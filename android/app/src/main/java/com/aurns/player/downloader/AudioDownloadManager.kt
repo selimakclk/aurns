@@ -21,6 +21,8 @@ data class DownloadProgress(
     val error: String? = null
 )
 
+private const val UA_VISIONOS = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+
 class AudioDownloadManager(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -35,8 +37,6 @@ class AudioDownloadManager(private val context: Context) {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
-
-    private const val UA_VISIONOS = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 
     fun startDownload(videoId: String, title: String, artist: String) {
         downloadJob?.cancel()
