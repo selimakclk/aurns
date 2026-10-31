@@ -463,7 +463,7 @@ fun MainScreen(
             )
 
             // EVRENSEL CANLI İNDİRME ÇUBUĞU (MYT Hızı & Gerçek Zamanlı %)
-            AnimatedVisibility(visible = dlProgress.isRunning || dlProgress.isDone) {
+            AnimatedVisibility(visible = dlProgress.isRunning || dlProgress.isDone || dlProgress.error != null) {
                 DownloadProgressBanner(dlProgress = dlProgress, onCancel = { downloadManager.cancelActiveDownload() })
             }
 
@@ -1540,6 +1540,19 @@ fun PlayerProgressSlider(
 
 @Composable
 fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
+    LaunchedEffect(dlProgress.isDone) {
+        if (dlProgress.isDone) {
+            kotlinx.coroutines.delay(2500)
+            onCancel()
+        }
+    }
+    LaunchedEffect(dlProgress.error) {
+        if (dlProgress.error != null) {
+            kotlinx.coroutines.delay(3500)
+            onCancel()
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1555,10 +1568,10 @@ fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (dlProgress.isDone) "İNDİRME TAMAMLANDI" else "PARÇA İNDİRİLİYOR (MYT HIZI)",
+                    text = if (dlProgress.isDone) "İNDİRME TAMAMLANDI" else if (dlProgress.error != null) "HATA: ${dlProgress.error}" else "PARÇA İNDİRİLİYOR (MYT HIZI)",
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
-                    color = if (dlProgress.isDone) AccentOrange else AccentPink
+                    color = if (dlProgress.isDone) AccentOrange else if (dlProgress.error != null) Color(0xFFFF3B30) else AccentPink
                 )
                 Text(
                     text = dlProgress.title,
@@ -1570,10 +1583,10 @@ fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
                 )
             }
             Text(
-                text = "%${dlProgress.percent}",
+                text = if (dlProgress.error != null) "!" else "%${dlProgress.percent}",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
-                color = AccentOrange
+                color = if (dlProgress.error != null) Color(0xFFFF3B30) else AccentOrange
             )
             if (dlProgress.isRunning) {
                 Spacer(modifier = Modifier.width(6.dp))

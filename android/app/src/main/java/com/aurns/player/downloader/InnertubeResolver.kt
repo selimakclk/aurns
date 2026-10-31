@@ -66,9 +66,6 @@ object InnertubeResolver {
     private const val UA_DESKTOP = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     private const val UA_VISIONOS = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 
-    @Volatile
-    private var cachedVisitorData: String? = null
-
     /**
      * 1. YouTube İç Web API'sinden (Innertube WEB) Şarkı Arama
      * Güvenilir, sınırsız ve 0.1 saniye yanıt süreli.
@@ -100,12 +97,6 @@ object InnertubeResolver {
             val response = client.newCall(request).execute()
             val bodyStr = response.body?.string() ?: return@withContext emptyList()
             val json = JSONObject(bodyStr)
-
-            // Visitor Data yakala (İlerideki indirme istekleri için)
-            val vis = json.optJSONObject("responseContext")?.optString("visitorData")
-            if (!vis.isNullOrEmpty()) {
-                cachedVisitorData = vis
-            }
 
             // Özyinelemeli (Recursive) Video Arama - Hiçbir sonucu kaçırmaz
             val renderers = mutableListOf<JSONObject>()
@@ -148,14 +139,12 @@ object InnertubeResolver {
 
     /**
      * 2. Doğrudan Ses Akışı Linkini Çözümleme (Direct Audio Stream Extractor)
-     * VisionOS Client + Session Cookie + Visitor ID ile doğrudan Google CDN HTTPS linki üretir.
+     * Her video için özel oturum çerezi ve 444-byte visitorId alarak doğrudan Google CDN linki çözer.
      */
     suspend fun resolveAudioStream(videoId: String): StreamInfo? = withContext(Dispatchers.IO) {
         try {
-            // Oturum çerezleri veya Visitor ID eksikse hızlı bir GET ile oturum aç
-            if (cachedVisitorData.isNullOrEmpty()) {
-                refreshSession(videoId)
-            }
+            // Her video için taze watch oturumu aç ve visitorData al (Asla atlama, kritik!)
+            val visitorId = fetchWatchSession(videoId)
 
             val reqBody = JSONObject().apply {
                 put("videoId", videoId)
@@ -182,27 +171,34 @@ object InnertubeResolver {
                 .header("X-Youtube-Client-Version", "1.02")
                 .header("Origin", "https://www.youtube.com")
 
-            cachedVisitorData?.let {
-                reqBuilder.header("X-Goog-Visitor-Id", it)
+            if (!visitorId.isNullOrEmpty()) {
+                reqBuilder.header("X-Goog-Visitor-Id", visitorId)
             }
 
             val response = client.newCall(reqBuilder.post(reqBody.toString().toRequestBody(JSON_MEDIA)).build()).execute()
             val bodyStr = response.body?.string() ?: return@withContext null
             val json = JSONObject(bodyStr)
 
-            val playability = json.optJSONObject("playabilityStatus")
-            val status = playability?.optString("status")
+            val best = extractBestAudio(json)
+            if (best != null) return@withContext best
 
-            // Eğer LOGIN_REQUIRED verirse oturumu yenileyip bir kez daha dene
-            if (status != "OK") {
-                refreshSession(videoId)
-                val retryResponse = client.newCall(reqBuilder.post(reqBody.toString().toRequestBody(JSON_MEDIA)).build()).execute()
-                val retryBody = retryResponse.body?.string() ?: return@withContext null
-                val retryJson = JSONObject(retryBody)
-                return@withContext extractBestAudio(retryJson)
+            // Eğer ilk denemede akış gelmezse bir kez daha taze oturumla dene
+            val retryVis = fetchWatchSession(videoId)
+            val retryBuilder = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+                .header("User-Agent", UA_VISIONOS)
+                .header("Content-Type", "application/json")
+                .header("X-Youtube-Client-Name", "101")
+                .header("X-Youtube-Client-Version", "1.02")
+                .header("Origin", "https://www.youtube.com")
+
+            if (!retryVis.isNullOrEmpty()) {
+                retryBuilder.header("X-Goog-Visitor-Id", retryVis)
             }
 
-            return@withContext extractBestAudio(json)
+            val retryResp = client.newCall(retryBuilder.post(reqBody.toString().toRequestBody(JSON_MEDIA)).build()).execute()
+            val retryBody = retryResp.body?.string() ?: return@withContext null
+            return@withContext extractBestAudio(JSONObject(retryBody))
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext null
@@ -222,7 +218,7 @@ object InnertubeResolver {
             if (!mime.startsWith("audio/")) continue
 
             val url = fmt.optString("url")
-            if (url.isEmpty()) continue // Şifresiz doğrudan Google CDN linki olanları seç
+            if (url.isEmpty()) continue // Doğrudan CDN linki olanları seç
 
             val bitrate = fmt.optInt("bitrate", 0)
             val contentLength = fmt.optLong("contentLength", 0L)
@@ -236,8 +232,8 @@ object InnertubeResolver {
         return bestAudio
     }
 
-    private fun refreshSession(videoId: String) {
-        try {
+    private fun fetchWatchSession(videoId: String): String? {
+        return try {
             val watchUrl = "https://www.youtube.com/watch?v=$videoId&bpctr=9999999999&has_verified=1"
             val req = Request.Builder()
                 .url(watchUrl)
@@ -250,10 +246,11 @@ object InnertubeResolver {
             val html = resp.body?.string().orEmpty()
             val matcher = Pattern.compile("\"visitorData\":\\s*\"([^\"]+)\"").matcher(html)
             if (matcher.find()) {
-                cachedVisitorData = matcher.group(1)
-            }
+                matcher.group(1)
+            } else null
         } catch (e: Exception) {
             e.printStackTrace()
+            null
         }
     }
 

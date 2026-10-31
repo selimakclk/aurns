@@ -3,6 +3,7 @@ package com.aurns.player.downloader
 import android.content.Context
 import android.media.MediaScannerConnection
 import android.os.Environment
+import android.widget.Toast
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -46,6 +47,9 @@ class AudioDownloadManager(private val context: Context) {
             // 1. YouTube Doğrudan Ses Linkini Çözümle (0.1 sn)
             val streamInfo = InnertubeResolver.resolveAudioStream(videoId)
             if (streamInfo == null || streamInfo.url.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Ses akışı alınamadı, tekrar deneyin.", Toast.LENGTH_SHORT).show()
+                }
                 _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = "Ses akışı alınamadı")
                 return@launch
             }
