@@ -1,8 +1,11 @@
 package com.aurns.player.downloader
 
+import android.content.ContentValues
 import android.content.Context
 import android.media.MediaScannerConnection
+import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Toast
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,7 +47,7 @@ class AudioDownloadManager(private val context: Context) {
         downloadJob = scope.launch {
             _currentProgress.value = DownloadProgress(title, 0, isRunning = true)
 
-            // 1. YouTube Doğrudan Ses Linkini Çözümle (0.1 sn)
+            // 1. YouTube Doğrudan Ses Linkini Çözümle
             val streamInfo = InnertubeResolver.resolveAudioStream(videoId)
             if (streamInfo == null || streamInfo.url.isEmpty()) {
                 withContext(Dispatchers.Main) {
@@ -54,19 +57,16 @@ class AudioDownloadManager(private val context: Context) {
                 return@launch
             }
 
-            // 2. Güvenli Dosya İsmi ve Hedef Klasör (.m4a)
-            val safeFileName = title.replace(Regex("[^a-zA-Z0-9çğıöşüÇĞİÖŞÜ\\s-_.]"), "")
+            // 2. Güvenli Dosya İsmi Belirle (.m4a)
+            val safeBaseName = title.replace(Regex("[^a-zA-Z0-9çğıöşüÇĞİÖŞÜ\\s-_.]"), "")
                 .trim()
                 .ifEmpty { "Aurns_Track_${System.currentTimeMillis()}" }
-                .take(64) + ".m4a"
+                .take(64)
+            val safeFileName = "$safeBaseName.m4a"
 
-            val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-            val aurnsDir = File(musicDir, "Aurns")
-            if (!aurnsDir.exists()) aurnsDir.mkdirs()
-            val targetFile = File(aurnsDir, safeFileName)
-            val tempFile = File(aurnsDir, "$safeFileName.tmp")
+            // 3. Geçici İndirme Dosyası (Uygulamanın Özel Cache Alanı - EPERM İzni Hatası Vermez)
+            val tempFile = File(context.cacheDir, "dl_${System.currentTimeMillis()}.tmp")
 
-            // 3. DOĞRUDAN OKHTTP STREAM İLE ANINDA İNDİR (MYT Hızı: 0.5 Saniyede Tamamlama)
             try {
                 val req = Request.Builder()
                     .url(streamInfo.url)
@@ -91,7 +91,7 @@ class AudioDownloadManager(private val context: Context) {
                     val inStream = body.byteStream()
                     val outStream = FileOutputStream(tempFile)
 
-                    val buffer = ByteArray(64 * 1024) // 64 KB yüksek hızlı tampon
+                    val buffer = ByteArray(64 * 1024) // 64 KB yüksek hızlı bellek tamponu (MYT Hızı)
                     var totalRead = 0L
                     var lastUpdate = System.currentTimeMillis()
 
@@ -114,33 +114,87 @@ class AudioDownloadManager(private val context: Context) {
                     inStream.close()
 
                     if (!isActive) {
-                        tempFile.delete()
                         return@launch
                     }
 
-                    // Temp dosyayı gerçek dosyaya dönüştür
-                    if (targetFile.exists()) targetFile.delete()
-                    tempFile.renameTo(targetFile)
+                    // 4. Android Medya Depolamasına (Scoped Storage / MediaStore) Güvenli Aktarım
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val resolver = context.contentResolver
+                        // Aynı isimde eski kayıt varsa çakışmayı önlemek için temizle
+                        try {
+                            val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} = ?"
+                            val selectionArgs = arrayOf(safeFileName)
+                            resolver.delete(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, selection, selectionArgs)
+                        } catch (_: Exception) {}
+
+                        val contentValues = ContentValues().apply {
+                            put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
+                            put(MediaStore.Audio.Media.TITLE, title)
+                            put(MediaStore.Audio.Media.ARTIST, artist)
+                            put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
+                            put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/Aurns")
+                            put(MediaStore.Audio.Media.IS_PENDING, 1)
+                        }
+
+                        val mediaUri = resolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
+                        if (mediaUri != null) {
+                            resolver.openOutputStream(mediaUri)?.use { destOut ->
+                                tempFile.inputStream().use { srcIn ->
+                                    srcIn.copyTo(destOut)
+                                }
+                            }
+                            contentValues.clear()
+                            contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                            resolver.update(mediaUri, contentValues, null, null)
+                        } else {
+                            saveToFallback(tempFile, safeFileName)
+                        }
+                    } else {
+                        // Android 9 ve altı
+                        try {
+                            val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
+                            val aurnsDir = File(musicDir, "Aurns").apply { mkdirs() }
+                            val targetFile = File(aurnsDir, safeFileName)
+                            tempFile.copyTo(targetFile, overwrite = true)
+                            MediaScannerConnection.scanFile(
+                                context,
+                                arrayOf(targetFile.absolutePath),
+                                arrayOf("audio/mp4", "audio/m4a"),
+                                null
+                            )
+                        } catch (_: Exception) {
+                            saveToFallback(tempFile, safeFileName)
+                        }
+                    }
 
                     _currentProgress.value = DownloadProgress(title, 100, isRunning = false, isDone = true)
 
-                    // 4. Android Medya Kütüphanesine Anında Kaydet
-                    MediaScannerConnection.scanFile(
-                        context,
-                        arrayOf(targetFile.absolutePath),
-                        arrayOf("audio/mp4", "audio/m4a")
-                    ) { _, _ ->
-                        scope.launch(Dispatchers.Main) {
-                            onDownloadFinishedListener?.invoke()
-                        }
+                    delay(300)
+                    withContext(Dispatchers.Main) {
+                        onDownloadFinishedListener?.invoke()
                     }
                 }
             } catch (e: Exception) {
                 if (isActive) {
-                    tempFile.delete()
                     _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = e.localizedMessage)
                 }
+            } finally {
+                if (tempFile.exists()) {
+                    tempFile.delete()
+                }
             }
+        }
+    }
+
+    private fun saveToFallback(tempFile: File, safeFileName: String) {
+        try {
+            val fallbackDir = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: context.filesDir
+            val aurnsFallback = File(fallbackDir, "Aurns").apply { mkdirs() }
+            val destFile = File(aurnsFallback, safeFileName)
+            tempFile.copyTo(destFile, overwrite = true)
+            MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf("audio/mp4", "audio/m4a"), null)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 

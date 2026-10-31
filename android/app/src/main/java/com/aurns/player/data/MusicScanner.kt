@@ -3,7 +3,9 @@ package com.aurns.player.data
 import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.os.Environment
 import android.provider.MediaStore
+import java.io.File
 
 object MusicScanner {
 
@@ -60,6 +62,37 @@ object MusicScanner {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        // 2. Uygulamanın Dahili/Harici Klasöründeki İndirilen Parçaları da Tara
+        try {
+            val fallbackDir = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC)
+            val aurnsDir = fallbackDir?.let { File(it, "Aurns") }
+            if (aurnsDir != null && aurnsDir.exists() && aurnsDir.isDirectory) {
+                aurnsDir.listFiles()?.filter {
+                    it.isFile && (it.name.endsWith(".m4a", ignoreCase = true) || it.name.endsWith(".mp3", ignoreCase = true))
+                }?.forEach { f ->
+                    val alreadyInList = trackList.any {
+                        it.title.equals(f.nameWithoutExtension, ignoreCase = true) || it.path == f.absolutePath
+                    }
+                    if (!alreadyInList) {
+                        trackList.add(
+                            Track(
+                                id = f.hashCode().toLong(),
+                                title = f.nameWithoutExtension,
+                                artist = "İndirilen Parça",
+                                durationSec = 0,
+                                path = f.absolutePath,
+                                uri = Uri.fromFile(f),
+                                albumArtUri = null
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
         return trackList
     }
 }
