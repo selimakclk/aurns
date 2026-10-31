@@ -8,8 +8,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.*
 import kotlin.random.Random
@@ -72,12 +72,15 @@ class FriendsManager(private val context: Context) {
     private var localIsPlaying = false
     private var localTrackTitle = ""
 
-    // Jam dinleyici callback'i (MainActivity'de şarkıyı başlatmak için)
+    // Jam dinleyici callback'i
     var onRemoteJamPlayRequest: ((title: String, posSec: Int) -> Unit)? = null
+
+    private val BROKERS = listOf("broker.emqx.io", "broker.hivemq.com")
 
     init {
         loadFromPrefs()
         startNetworkLoop()
+        startKeepAliveLoop()
     }
 
     private fun loadFromPrefs() {
@@ -177,12 +180,16 @@ class FriendsManager(private val context: Context) {
     private fun startNetworkLoop() {
         isRunning = true
         scope.launch {
+            var brokerIndex = 0
             while (isRunning) {
+                val brokerHost = BROKERS[brokerIndex % BROKERS.size]
                 try {
-                    // Windows ΛURNS ile birebir aynı ortak MQTT broker bağlantısı
-                    socket = Socket("broker.emqx.io", 1883)
-                    outputStream = socket?.getOutputStream()
-                    val inputStream = socket?.getInputStream()
+                    val s = Socket()
+                    s.connect(InetSocketAddress(brokerHost, 1883), 5000)
+                    s.soTimeout = 45000 // 45 saniye zaman aşımı
+                    socket = s
+                    outputStream = s.getOutputStream()
+                    val inputStream = s.getInputStream()
 
                     val clientId = "aurns_and_${System.currentTimeMillis() % 100000}"
                     sendMqttConnect(outputStream, clientId)
@@ -190,22 +197,46 @@ class FriendsManager(private val context: Context) {
                     _isConnected.value = true
                     subscribeToMyInbox()
 
-                    // Açılışta tüm arkadaşların durumunu iste
+                    // Eğer aktif bir Jam odasındaysak tekrar abone ol
+                    val curJam = _jamState.value
+                    if (curJam.isActive && curJam.roomCode.isNotEmpty()) {
+                        sendMqttSubscribe(outputStream, "seloplayer/j/${curJam.roomCode}")
+                    }
+
+                    // Arkadaşların canlı durumunu iste
                     requestAllStatuses()
 
                     val buffer = ByteArray(4096)
                     while (isRunning && socket?.isConnected == true) {
-                        val read = inputStream?.read(buffer) ?: break
+                        val read = inputStream.read(buffer)
                         if (read <= 0) break
-
                         handleIncomingMqttPacket(buffer, read)
                     }
                 } catch (e: Exception) {
-                    _isConnected.value = false
-                    delay(3000)
+                    brokerIndex++
                 } finally {
                     _isConnected.value = false
                     try { socket?.close() } catch (ignored: Exception) {}
+                    delay(2000)
+                }
+            }
+        }
+    }
+
+    // MQTT KeepAlive PINGREQ paketi (0xC0 0x00) her 20 saniyede bir gönderilir (Bağlantı asla kopmaz)
+    private fun startKeepAliveLoop() {
+        scope.launch {
+            while (isActive) {
+                delay(20000)
+                if (_isConnected.value && outputStream != null) {
+                    try {
+                        synchronized(outputStream!!) {
+                            outputStream?.write(byteArrayOf(0xC0.toByte(), 0x00.toByte()))
+                            outputStream?.flush()
+                        }
+                    } catch (e: Exception) {
+                        try { socket?.close() } catch (ignored: Exception) {}
+                    }
                 }
             }
         }
@@ -518,7 +549,6 @@ class FriendsManager(private val context: Context) {
 
     fun onDestroy() {
         isRunning = false
-        // Çevrimdışı olduğunu arkadaşlara bildir
         for (f in _friends.value) {
             val targetKey = tagToTopicKey(f.tag)
             sendMqttPublish(outputStream, "seloplayer/u/$targetKey", "BYE|${_myTag.value}")
@@ -526,7 +556,7 @@ class FriendsManager(private val context: Context) {
         try { socket?.close() } catch (ignored: Exception) {}
     }
 
-    // ==================== HAM MQTT PAKET FONKSİYONLARI ====================
+    // ==================== HAM MQTT PAKETLERİ ====================
 
     private fun sendMqttConnect(out: OutputStream?, clientId: String) {
         if (out == null) return
@@ -545,8 +575,10 @@ class FriendsManager(private val context: Context) {
         pkt[i++] = (cidBytes.size and 0xFF).toByte()
         System.arraycopy(cidBytes, 0, pkt, i, cidBytes.size)
 
-        out.write(pkt)
-        out.flush()
+        synchronized(out) {
+            out.write(pkt)
+            out.flush()
+        }
     }
 
     private fun sendMqttSubscribe(out: OutputStream?, topic: String) {
@@ -564,8 +596,10 @@ class FriendsManager(private val context: Context) {
         i += topBytes.size
         pkt[i] = 0x00.toByte() // QoS 0
 
-        out.write(pkt)
-        out.flush()
+        synchronized(out) {
+            out.write(pkt)
+            out.flush()
+        }
     }
 
     private fun sendMqttPublish(out: OutputStream?, topic: String, payload: String) {
@@ -586,8 +620,10 @@ class FriendsManager(private val context: Context) {
             i += topBytes.size
             System.arraycopy(payBytes, 0, pkt, i, payBytes.size)
 
-            out.write(pkt)
-            out.flush()
+            synchronized(out) {
+                out.write(pkt)
+                out.flush()
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }

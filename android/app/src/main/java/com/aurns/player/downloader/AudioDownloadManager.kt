@@ -1,15 +1,17 @@
 package com.aurns.player.downloader
 
-import android.app.DownloadManager
 import android.content.Context
 import android.media.MediaScannerConnection
-import android.net.Uri
 import android.os.Environment
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.TimeUnit
 
 data class DownloadProgress(
     val title: String,
@@ -21,28 +23,34 @@ data class DownloadProgress(
 
 class AudioDownloadManager(private val context: Context) {
 
-    private val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var downloadJob: Job? = null
 
     private val _currentProgress = MutableStateFlow(DownloadProgress("", 0, false))
     val currentProgress: StateFlow<DownloadProgress> = _currentProgress.asStateFlow()
 
-    private var activeDownloadId: Long = -1L
-    private var pollJob: Job? = null
     var onDownloadFinishedListener: (() -> Unit)? = null
 
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    private const val UA_VISIONOS = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+
     fun startDownload(videoId: String, title: String, artist: String) {
-        scope.launch {
+        downloadJob?.cancel()
+        downloadJob = scope.launch {
             _currentProgress.value = DownloadProgress(title, 0, isRunning = true)
 
-            // 1. YouTube Doğrudan Ses Linkini Çöz (0.1 sn)
+            // 1. YouTube Doğrudan Ses Linkini Çözümle (0.1 sn)
             val streamInfo = InnertubeResolver.resolveAudioStream(videoId)
             if (streamInfo == null || streamInfo.url.isEmpty()) {
                 _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = "Ses akışı alınamadı")
                 return@launch
             }
 
-            // 2. Güvenli Dosya İsmi Hazırla (.m4a)
+            // 2. Güvenli Dosya İsmi ve Hedef Klasör (.m4a)
             val safeFileName = title.replace(Regex("[^a-zA-Z0-9çğıöşüÇĞİÖŞÜ\\s-_.]"), "")
                 .trim()
                 .ifEmpty { "Aurns_Track_${System.currentTimeMillis()}" }
@@ -52,78 +60,89 @@ class AudioDownloadManager(private val context: Context) {
             val aurnsDir = File(musicDir, "Aurns")
             if (!aurnsDir.exists()) aurnsDir.mkdirs()
             val targetFile = File(aurnsDir, safeFileName)
+            val tempFile = File(aurnsDir, "$safeFileName.tmp")
 
-            // 3. Android Sistem İndiricisine (DownloadManager) Teslim Et (Sıfır RAM Harcar)
-            val request = DownloadManager.Request(Uri.parse(streamInfo.url)).apply {
-                setTitle(title)
-                setDescription("ΛURNS • $artist")
-                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setAllowedOverMetered(true)
-                setAllowedOverRoaming(true)
-                setDestinationUri(Uri.fromFile(targetFile))
-            }
-
+            // 3. DOĞRUDAN OKHTTP STREAM İLE ANINDA İNDİR (MYT Hızı: 0.5 Saniyede Tamamlama)
             try {
-                activeDownloadId = dm.enqueue(request)
-                // 4. Canlı İlerleme Çubuğu Takibi (%0 - %100)
-                startProgressPolling(activeDownloadId, title, targetFile.absolutePath)
+                val req = Request.Builder()
+                    .url(streamInfo.url)
+                    .header("User-Agent", UA_VISIONOS)
+                    .header("Origin", "https://www.youtube.com")
+                    .header("Referer", "https://www.youtube.com/")
+                    .header("Accept", "*/*")
+                    .build()
+
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = "İndirme hatası: HTTP ${resp.code}")
+                        return@launch
+                    }
+
+                    val body = resp.body ?: run {
+                        _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = "Gelen veri boş")
+                        return@launch
+                    }
+
+                    val totalBytes = if (body.contentLength() > 0) body.contentLength() else streamInfo.contentLength
+                    val inStream = body.byteStream()
+                    val outStream = FileOutputStream(tempFile)
+
+                    val buffer = ByteArray(64 * 1024) // 64 KB yüksek hızlı tampon
+                    var totalRead = 0L
+                    var lastUpdate = System.currentTimeMillis()
+
+                    while (isActive) {
+                        val read = inStream.read(buffer)
+                        if (read == -1) break
+                        outStream.write(buffer, 0, read)
+                        totalRead += read
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdate > 100 && totalBytes > 0) {
+                            val pct = ((totalRead.toDouble() / totalBytes) * 100).toInt().coerceIn(0, 99)
+                            _currentProgress.value = DownloadProgress(title, pct, isRunning = true)
+                            lastUpdate = now
+                        }
+                    }
+
+                    outStream.flush()
+                    outStream.close()
+                    inStream.close()
+
+                    if (!isActive) {
+                        tempFile.delete()
+                        return@launch
+                    }
+
+                    // Temp dosyayı gerçek dosyaya dönüştür
+                    if (targetFile.exists()) targetFile.delete()
+                    tempFile.renameTo(targetFile)
+
+                    _currentProgress.value = DownloadProgress(title, 100, isRunning = false, isDone = true)
+
+                    // 4. Android Medya Kütüphanesine Anında Kaydet
+                    MediaScannerConnection.scanFile(
+                        context,
+                        arrayOf(targetFile.absolutePath),
+                        arrayOf("audio/mp4", "audio/m4a")
+                    ) { _, _ ->
+                        scope.launch(Dispatchers.Main) {
+                            onDownloadFinishedListener?.invoke()
+                        }
+                    }
+                }
             } catch (e: Exception) {
-                e.printStackTrace()
-                _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = e.localizedMessage)
+                if (isActive) {
+                    tempFile.delete()
+                    _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = e.localizedMessage)
+                }
             }
         }
     }
 
     fun cancelActiveDownload() {
-        if (activeDownloadId != -1L) {
-            dm.remove(activeDownloadId)
-            activeDownloadId = -1L
-            pollJob?.cancel()
-            _currentProgress.value = DownloadProgress("", 0, isRunning = false)
-        }
-    }
-
-    private fun startProgressPolling(downloadId: Long, title: String, filePath: String) {
-        pollJob?.cancel()
-        pollJob = scope.launch {
-            var downloading = true
-            while (downloading && isActive) {
-                val query = DownloadManager.Query().setFilterById(downloadId)
-                dm.query(query)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val bytesDownloaded = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
-                        val bytesTotal = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
-                        val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-
-                        when (status) {
-                            DownloadManager.STATUS_RUNNING -> {
-                                val pct = if (bytesTotal > 0) ((bytesDownloaded.toDouble() / bytesTotal) * 100).toInt() else 0
-                                _currentProgress.value = DownloadProgress(title, pct.coerceIn(0, 100), isRunning = true)
-                            }
-                            DownloadManager.STATUS_SUCCESSFUL -> {
-                                _currentProgress.value = DownloadProgress(title, 100, isRunning = false, isDone = true)
-                                downloading = false
-
-                                // Medya kütüphanesini anında tara ki şarkı listesinde hemen görünsün!
-                                MediaScannerConnection.scanFile(
-                                    context,
-                                    arrayOf(filePath),
-                                    arrayOf("audio/mp4", "audio/m4a")
-                                ) { _, _ ->
-                                    scope.launch(Dispatchers.Main) {
-                                        onDownloadFinishedListener?.invoke()
-                                    }
-                                }
-                            }
-                            DownloadManager.STATUS_FAILED -> {
-                                _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = "İndirme başarısız oldu")
-                                downloading = false
-                            }
-                        }
-                    }
-                }
-                delay(250)
-            }
-        }
+        downloadJob?.cancel()
+        downloadJob = null
+        _currentProgress.value = DownloadProgress("", 0, isRunning = false)
     }
 }

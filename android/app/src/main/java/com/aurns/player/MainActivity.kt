@@ -18,7 +18,6 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -36,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -50,6 +50,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.aurns.player.data.MusicScanner
 import com.aurns.player.data.Track
 import com.aurns.player.downloader.AudioDownloadManager
@@ -59,7 +60,6 @@ import com.aurns.player.downloader.SearchResult
 import com.aurns.player.friends.FriendItem
 import com.aurns.player.friends.FriendRequest
 import com.aurns.player.friends.FriendsManager
-import com.aurns.player.friends.JamRoomState
 import com.aurns.player.service.PlaybackService
 import com.aurns.player.ui.theme.*
 import com.google.common.util.concurrent.ListenableFuture
@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
     private var isShuffle by mutableStateOf(false)
     private var isRepeat by mutableStateOf(false)
 
-    // Sadece Dock'un yeniden çizilmesi için akışlar (60 FPS koruması)
+    // Sadece Slider'ın bağımsız güncellenmesi için akışlar (Ana ekranı ve listeyi asla tetiklemez)
     private val currentPositionFlow = MutableStateFlow(0)
     private val durationFlow = MutableStateFlow(0)
 
@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
 
         downloadManager.onDownloadFinishedListener = {
             loadLocalTracks()
-            Toast.makeText(this, "Şarkı arşive eklendi!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Şarkı kütüphaneye eklendi!", Toast.LENGTH_SHORT).show()
         }
 
         // Arkadaş Jam üzerinden şarkı senkronize ettiğinde
@@ -110,7 +110,7 @@ class MainActivity : ComponentActivity() {
                 playTrack(idx)
                 if (posSec > 0) seekTo(posSec)
             } else {
-                Toast.makeText(this, "Arkadaşın '$title' çalıyor (Yerel arşivde aranıyor)", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Arkadaşın '$title' çalıyor", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -323,14 +323,17 @@ fun MainScreen(
         else if (isDrawerOpen) isDrawerOpen = false
     }
 
-    val filteredTracks by remember(tracks, searchQuery) {
-        derivedStateOf {
-            if (searchQuery.isBlank()) tracks
-            else tracks.filter {
-                it.title.contains(searchQuery, ignoreCase = true) ||
-                it.artist.contains(searchQuery, ignoreCase = true)
-            }
+    // Arama filtrelemesi
+    val filteredTracks = remember(tracks, searchQuery) {
+        if (searchQuery.isBlank()) tracks
+        else tracks.filter {
+            it.title.contains(searchQuery, ignoreCase = true) ||
+            it.artist.contains(searchQuery, ignoreCase = true)
         }
+    }
+
+    val currentPlayingTrackId = remember(tracks, currentTrackIndex) {
+        if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].id else -1L
     }
 
     Box(modifier = Modifier.fillMaxSize().background(BgObsidian)) {
@@ -342,22 +345,20 @@ fun MainScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(60.dp)
+                    .height(56.dp)
                     .background(BgSurface)
-                    .padding(horizontal = 14.dp),
+                    .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Menü Butonu
                 IconButton(onClick = { isDrawerOpen = true }) {
                     Icon(Icons.Default.Menu, contentDescription = "Menü", tint = TextWhite)
                 }
 
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(4.dp))
 
-                // Λ U R N S Logosu
                 Text(
                     text = "Λ U R N S",
-                    fontSize = 20.sp,
+                    fontSize = 19.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextWhite,
                     letterSpacing = 2.sp
@@ -365,7 +366,7 @@ fun MainScreen(
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                // [Arkadaşlar] Butonu (Bekleyen İstek Rozetli)
+                // [Arkadaşlar] Butonu
                 Surface(
                     onClick = { isFriendsPanelOpen = true },
                     shape = RoundedCornerShape(16.dp),
@@ -387,7 +388,7 @@ fun MainScreen(
                             if (pendingRequests.isNotEmpty()) {
                                 Box(
                                     modifier = Modifier
-                                        .size(7.dp)
+                                        .size(6.dp)
                                         .clip(CircleShape)
                                         .background(AccentPink)
                                         .align(Alignment.TopEnd)
@@ -448,8 +449,8 @@ fun MainScreen(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                shape = RoundedCornerShape(20.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(16.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = BgInput,
                     unfocusedContainerColor = BgInput,
@@ -460,21 +461,21 @@ fun MainScreen(
                 )
             )
 
-            // EVRENSEL CANLI İNDİRME ÇUBUĞU
+            // EVRENSEL CANLI İNDİRME ÇUBUĞU (MYT Hızı & Gerçek Zamanlı %)
             AnimatedVisibility(visible = dlProgress.isRunning || dlProgress.isDone) {
                 DownloadProgressBanner(dlProgress = dlProgress, onCancel = { downloadManager.cancelActiveDownload() })
             }
 
-            // ŞARKI LİSTESİ (60 FPS Sıfır Kasıntı)
+            // ŞARKI LİSTESİ (Sıfır Kasıntı, Doğru Şarkı Çalma Düzeltmesi)
             if (filteredTracks.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.MusicNote, contentDescription = null, tint = TextMuted, modifier = Modifier.size(48.dp))
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text("Müzik bulunamadı", color = TextDim, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Icon(Icons.Default.MusicNote, contentDescription = null, tint = TextMuted, modifier = Modifier.size(44.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Müzik bulunamadı", color = TextDim, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(modifier = Modifier.height(4.dp))
                         Text("Sol üst menüden klasör tarayabilir veya + İndir'e basabilirsiniz.", color = TextMuted, fontSize = 12.sp)
                     }
@@ -482,23 +483,29 @@ fun MainScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxWidth().weight(1f),
-                    contentPadding = PaddingValues(bottom = 140.dp, top = 4.dp)
+                    contentPadding = PaddingValues(bottom = 130.dp, top = 2.dp)
                 ) {
                     itemsIndexed(filteredTracks, key = { _, track -> track.id }) { index, track ->
-                        val isCurrent = (index == currentTrackIndex)
+                        val isCurrent = (track.id == currentPlayingTrackId)
                         TrackRowItem(
                             index = index,
                             track = track,
                             isCurrent = isCurrent,
                             isPlaying = isPlaying,
-                            onClick = { onPlayTrack(index) }
+                            onClick = {
+                                // KRİTİK DÜZELTME: Aramadaki şarkıya tıklandığında tam doğru parçanın çalınması
+                                val realIndex = tracks.indexOfFirst { it.id == track.id }
+                                if (realIndex != -1) {
+                                    onPlayTrack(realIndex)
+                                }
+                            }
                         )
                     }
                 }
             }
         }
 
-        // ALT YÜZEN OYNATICI DOCK
+        // ALT YÜZEN OYNATICI DOCK (Recomposition İzolasyonu ile 60 FPS)
         if (currentTrackIndex in tracks.indices) {
             val curTrack = tracks[currentTrackIndex]
             FloatingPlayerDock(
@@ -517,7 +524,7 @@ fun MainScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
             )
         }
 
@@ -538,12 +545,12 @@ fun MainScreen(
             enter = slideInHorizontally(
                 initialOffsetX = { -it },
                 animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f)
-            ) + fadeIn(tween(200)),
+            ) + fadeIn(tween(180)),
             exit = slideOutHorizontally(
                 targetOffsetX = { -it },
                 animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f)
-            ) + fadeOut(tween(200)),
-            modifier = Modifier.fillMaxHeight().width(284.dp)
+            ) + fadeOut(tween(180)),
+            modifier = Modifier.fillMaxHeight().width(280.dp)
         ) {
             DrawerContent(
                 trackCount = tracks.size,
@@ -561,17 +568,17 @@ fun MainScreen(
             )
         }
 
-        // ARKADAŞLAR VE JAM TAM EKRAN PANELİ (Windows ΛURNS ile %100 Birebir 3 Sekmeli)
+        // ARKADAŞLAR VE JAM TAM EKRAN PANELİ
         AnimatedVisibility(
             visible = isFriendsPanelOpen,
             enter = slideInHorizontally(
                 initialOffsetX = { it },
                 animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f)
-            ) + fadeIn(tween(200)),
+            ) + fadeIn(tween(180)),
             exit = slideOutHorizontally(
                 targetOffsetX = { it },
                 animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f)
-            ) + fadeOut(tween(200)),
+            ) + fadeOut(tween(180)),
             modifier = Modifier.fillMaxSize()
         ) {
             FriendsPanelScreen(
@@ -600,23 +607,19 @@ fun MainScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = AccentOrange)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Güncellemeleri Denetle", color = TextWhite, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Text("Güncellemeleri Denetle", color = TextWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                 },
                 text = {
-                    Column {
-                        Text("ΛURNS Android v1.1.0", color = AccentPink, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            "Tebrikler! En güncel ve optimize edilmiş sürümü kullanıyorsunuz.\n• Tam Entegre Arkadaşlar & Jam Sistemi\n• YouTube Doğrudan Ses İndirici\n• Apple Yay Fiziği Menü\n• 60 FPS Ultra Akıcı Obsidian Arayüz",
-                            color = TextDim,
-                            fontSize = 13.sp
-                        )
-                    }
+                    Text(
+                        "ΛURNS Android v1.1.0\nEn güncel sürümü kullanıyorsunuz.\n• Anında Stream İndirme (MYT Hızı)\n• Doğru Şarkı Arama Eşlemesi\n• 60 FPS Sıfır Kasıntı GPU Katmanı",
+                        color = TextDim,
+                        fontSize = 13.sp
+                    )
                 },
                 confirmButton = {
                     TextButton(onClick = { isUpdateDialogOpen = false }) {
-                        Text("Harika", color = AccentOrange, fontWeight = FontWeight.Bold)
+                        Text("Tamam", color = AccentOrange, fontWeight = FontWeight.Bold)
                     }
                 }
             )
@@ -639,7 +642,7 @@ fun FriendsPanelScreen(
     val jamState by friendsManager.jamState.collectAsState()
     val isConnected by friendsManager.isConnected.collectAsState()
 
-    var selectedTab by remember { mutableIntStateOf(0) } // 0: Liste, 1: İstekler, 2: + Ekle
+    var selectedTab by remember { mutableIntStateOf(0) }
     var isCopied by remember { mutableStateOf(false) }
     var isEditNameOpen by remember { mutableStateOf(false) }
     var newNameInput by remember { mutableStateOf("") }
@@ -654,13 +657,11 @@ fun FriendsPanelScreen(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(horizontal = 14.dp, vertical = 8.dp)
         ) {
-            // 1. Üst Bar: Geri Dön, Başlık, Yenile Butonu
+            // Üst Bar
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp),
+                modifier = Modifier.fillMaxWidth().height(48.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onClose) {
@@ -678,13 +679,20 @@ fun FriendsPanelScreen(
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                // Çevrimiçi Sunucu Durumu
+                // Sunucu Bağlantı Durumu (Yeşil: Bağlı, Kırmızı: Bağlanıyor)
                 Box(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
                         .background(if (isConnected) Color(0xFF34C759) else Color(0xFFFF3B30))
                 )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (isConnected) "Canlı" else "Bağlanıyor",
+                    color = if (isConnected) Color(0xFF34C759) else Color(0xFFFF3B30),
+                    fontSize = 11.sp
+                )
+
                 Spacer(modifier = Modifier.width(8.dp))
 
                 IconButton(onClick = { friendsManager.requestAllStatuses() }) {
@@ -692,9 +700,9 @@ fun FriendsPanelScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            // 2. SENİN KARTIN (Windows ΛURNS ile Birebir)
+            // SENİN KARTIN
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = BgSurface,
@@ -702,13 +710,12 @@ fun FriendsPanelScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.padding(14.dp),
+                    modifier = Modifier.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Avatar & Durum Noktası
                     Box(
                         modifier = Modifier
-                            .size(46.dp)
+                            .size(44.dp)
                             .clip(CircleShape)
                             .background(Color(0xFF2A142E)),
                         contentAlignment = Alignment.Center
@@ -716,27 +723,19 @@ fun FriendsPanelScreen(
                         Text(
                             text = (myName.firstOrNull() ?: myTag.firstOrNull() ?: 'U').uppercase(),
                             color = AccentOrange,
-                            fontSize = 20.sp,
+                            fontSize = 18.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Box(
                             modifier = Modifier
-                                .size(12.dp)
+                                .size(10.dp)
                                 .clip(CircleShape)
-                                .background(BgSurface)
-                                .align(Alignment.BottomEnd),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(8.dp)
-                                    .clip(CircleShape)
-                                    .background(AccentPink)
-                            )
-                        }
+                                .background(AccentPink)
+                                .align(Alignment.BottomEnd)
+                        )
                     }
 
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -763,7 +762,7 @@ fun FriendsPanelScreen(
                         Text(
                             text = myTag,
                             color = TextWhite,
-                            fontSize = 15.sp,
+                            fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -771,17 +770,16 @@ fun FriendsPanelScreen(
                         Text(
                             text = "Görünen Adın: $myName",
                             color = AccentOrange,
-                            fontSize = 12.sp
+                            fontSize = 11.sp
                         )
                     }
 
-                    // Kopyala Butonu
                     Surface(
                         onClick = {
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             clipboard.setPrimaryClip(ClipData.newPlainText("Aurns Tag", myTag))
                             isCopied = true
-                            Toast.makeText(context, "Etiketin panoya kopyalandı!", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Etiket kopyalandı!", Toast.LENGTH_SHORT).show()
                         },
                         shape = RoundedCornerShape(8.dp),
                         color = if (isCopied) AccentOrange else Color(0xFF1E1E1E),
@@ -790,7 +788,7 @@ fun FriendsPanelScreen(
                         Text(
                             text = if (isCopied) "✓ Kopyalandı" else "Kopyala",
                             color = if (isCopied) Color.Black else TextWhite,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                         )
@@ -798,9 +796,9 @@ fun FriendsPanelScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 3. SEKMELER (Liste, İstekler, + Ekle)
+            // SEKMELER
             Surface(
                 shape = RoundedCornerShape(10.dp),
                 color = BgCard,
@@ -808,7 +806,7 @@ fun FriendsPanelScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.padding(4.dp),
+                    modifier = Modifier.padding(3.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
                     val tabs = listOf(
@@ -831,32 +829,28 @@ fun FriendsPanelScreen(
                                 fontSize = 12.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                 textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(vertical = 8.dp)
+                                modifier = Modifier.padding(vertical = 7.dp)
                             )
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 4. SEKME İÇERİKLERİ
             when (selectedTab) {
-                // SEKME 0: ARKADAŞ LİSTESİ
                 0 -> {
                     if (friends.isEmpty()) {
                         Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f),
+                            modifier = Modifier.fillMaxWidth().weight(1f),
                             contentAlignment = Alignment.Center
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(Icons.Default.PersonAdd, contentDescription = null, tint = TextMuted, modifier = Modifier.size(44.dp))
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text("Henüz ekli arkadaşın yok.", color = TextDim, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text("'+ Ekle' sekmesinden arkadaşının etiketini girerek davet gönderebilirsin.", color = TextMuted, fontSize = 12.sp, textAlign = TextAlign.Center)
+                                Icon(Icons.Default.PersonAdd, contentDescription = null, tint = TextMuted, modifier = Modifier.size(40.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("Henüz ekli arkadaşın yok.", color = TextDim, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text("'+ Ekle' sekmesinden arkadaşının etiketini girerek davet gönder.", color = TextMuted, fontSize = 11.sp, textAlign = TextAlign.Center)
                             }
                         }
                     } else {
@@ -868,19 +862,16 @@ fun FriendsPanelScreen(
                                     onInviteJam = { friendsManager.inviteFriendToJam(friend.tag) },
                                     onRemove = { friendsManager.removeFriend(friend.tag) }
                                 )
-                                Spacer(modifier = Modifier.height(8.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
                             }
                         }
                     }
                 }
 
-                // SEKME 1: BEKLEYEN İSTEKLER
                 1 -> {
                     if (pendingRequests.isEmpty()) {
                         Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .weight(1f),
+                            modifier = Modifier.fillMaxWidth().weight(1f),
                             contentAlignment = Alignment.Center
                         ) {
                             Text("Bekleyen arkadaşlık isteği yok.", color = TextMuted, fontSize = 13.sp)
@@ -893,18 +884,15 @@ fun FriendsPanelScreen(
                                     onAccept = { friendsManager.acceptFriendRequest(req.tag) },
                                     onReject = { friendsManager.rejectFriendRequest(req.tag) }
                                 )
-                                Spacer(modifier = Modifier.height(8.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
                             }
                         }
                     }
                 }
 
-                // SEKME 2: + ARKADAŞ EKLE
                 2 -> {
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
+                        modifier = Modifier.fillMaxWidth().weight(1f)
                     ) {
                         Text(
                             text = "Arkadaşının Etiketini Gir",
@@ -914,12 +902,12 @@ fun FriendsPanelScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Arkadaşının Aurns uygulamasındaki tam etiketi (# ile birlikte) gir.",
+                            text = "Arkadaşının bilgisayarında veya telefonunda yazan tam etiketi (# ile birlikte) gir.",
                             color = TextDim,
                             fontSize = 12.sp
                         )
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
 
                         OutlinedTextField(
                             value = addTagInput,
@@ -938,7 +926,7 @@ fun FriendsPanelScreen(
                             )
                         )
 
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
 
                         Button(
                             onClick = {
@@ -952,7 +940,7 @@ fun FriendsPanelScreen(
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
                             shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.fillMaxWidth().height(48.dp)
+                            modifier = Modifier.fillMaxWidth().height(46.dp)
                         ) {
                             Icon(Icons.Default.PersonAdd, contentDescription = null, tint = Color.Black)
                             Spacer(modifier = Modifier.width(8.dp))
@@ -1012,19 +1000,18 @@ fun FriendRowItem(
     onRemove: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         color = if (isInJamWithMe) Color(0xFF221326) else BgCard,
         border = BorderStroke(1.dp, if (isInJamWithMe) AccentPink else BorderDark),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Avatar & Çevrimiçi Rozeti
             Box(
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(38.dp)
                     .clip(CircleShape)
                     .background(Color(0xFF261C2C)),
                 contentAlignment = Alignment.Center
@@ -1032,25 +1019,25 @@ fun FriendRowItem(
                 Text(
                     text = (friend.name.firstOrNull() ?: 'U').uppercase(),
                     color = AccentOrange,
-                    fontSize = 16.sp,
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Box(
                     modifier = Modifier
-                        .size(10.dp)
+                        .size(9.dp)
                         .clip(CircleShape)
                         .background(if (friend.isOnline) Color(0xFF34C759) else Color(0xFF555555))
                         .align(Alignment.BottomEnd)
                 )
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = friend.name,
                     color = TextWhite,
-                    fontSize = 14.sp,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -1061,7 +1048,6 @@ fun FriendRowItem(
                     fontSize = 11.sp,
                     maxLines = 1
                 )
-                // Şarkı / Çevrimiçi Durumu
                 Text(
                     text = if (friend.isPlaying) "🎵 Çalıyor: ${friend.currentTrack}" else friend.currentTrack,
                     color = if (friend.isPlaying) AccentPink else if (friend.isOnline) Color(0xFF34C759) else TextMuted,
@@ -1072,7 +1058,6 @@ fun FriendRowItem(
                 )
             }
 
-            // Jam'e Davet Et / Birlikte Dinle Butonu
             if (friend.isOnline) {
                 Surface(
                     onClick = onInviteJam,
@@ -1091,9 +1076,8 @@ fun FriendRowItem(
                 }
             }
 
-            // Silme Butonu
             IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.Delete, contentDescription = "Arkadaşı Sil", tint = TextMuted, modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.Delete, contentDescription = "Arkadaşı Sil", tint = TextMuted, modifier = Modifier.size(15.dp))
             }
         }
     }
@@ -1106,19 +1090,19 @@ fun PendingRequestItem(
     onReject: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         color = BgCard,
         border = BorderStroke(1.dp, BorderDark),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = request.name, color = TextWhite, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Text(text = request.name, color = TextWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 Text(text = request.tag, color = TextDim, fontSize = 11.sp)
-                Text(text = "Sana arkadaşlık isteği gönderdi", color = AccentOrange, fontSize = 11.sp)
+                Text(text = "Sana arkadaşlık isteği gönderdi", color = AccentOrange, fontSize = 10.sp)
             }
 
             IconButton(onClick = onAccept) {
@@ -1157,7 +1141,7 @@ fun DrawerContent(
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 14.dp, vertical = 16.dp)
+                .padding(horizontal = 14.dp, vertical = 14.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1165,7 +1149,7 @@ fun DrawerContent(
             ) {
                 Text(
                     text = "Λ U R N S",
-                    fontSize = 22.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = TextWhite,
                     letterSpacing = 3.sp
@@ -1177,14 +1161,14 @@ fun DrawerContent(
             }
 
             Text(
-                text = "$trackCount yerel parça yüklü",
-                fontSize = 12.sp,
+                text = "$trackCount yerel parça",
+                fontSize = 11.sp,
                 color = AccentOrange,
-                modifier = Modifier.padding(start = 2.dp, bottom = 18.dp)
+                modifier = Modifier.padding(start = 2.dp, bottom = 14.dp)
             )
 
             HorizontalDivider(color = BorderDark, thickness = 0.5.dp)
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             DrawerMenuItem(
                 icon = Icons.Default.FolderOpen,
@@ -1193,17 +1177,17 @@ fun DrawerContent(
                 onClick = onScanFolder
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             DrawerMenuItem(
                 icon = Icons.Default.CloudDownload,
                 title = "Müzik Ara ve İndir",
-                subtitle = "YouTube'dan yüksek kalite",
+                subtitle = "YouTube'dan anında indir",
                 isSpecial = true,
                 onClick = onOpenDownload
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             DrawerMenuItem(
                 icon = Icons.Default.Groups,
@@ -1213,25 +1197,25 @@ fun DrawerContent(
                 onClick = onOpenFriends
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             DrawerMenuItem(
                 icon = Icons.Default.FileUpload,
                 title = "Oynatma Listesini İçe Aktar",
-                subtitle = "Paylaşılan listeyi yükle ve indir",
+                subtitle = "Paylaşılan listeyi ekle",
                 onClick = { onImportPlaylist(context) }
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             DrawerMenuItem(
                 icon = Icons.Default.FileDownload,
                 title = "Oynatma Listesini Dışa Aktar",
-                subtitle = "Arkadaşlarınla paylaşmak için",
+                subtitle = "Arkadaşlarınla paylaş",
                 onClick = onExportPlaylist
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             DrawerMenuItem(
                 icon = Icons.Default.DeleteSweep,
@@ -1243,7 +1227,7 @@ fun DrawerContent(
             Spacer(modifier = Modifier.weight(1f))
 
             HorizontalDivider(color = BorderDark, thickness = 0.5.dp)
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             DrawerMenuItem(
                 icon = Icons.Default.SystemUpdate,
@@ -1265,19 +1249,19 @@ fun DrawerMenuItem(
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         color = if (isSpecial) Color(0xFF18121E) else BgCard,
         border = if (isSpecial) BorderStroke(1.dp, Brush.horizontalGradient(listOf(AccentOrange, AccentPink)))
                  else BorderStroke(0.5.dp, BorderDark),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(34.dp)
+                    .size(32.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(if (isSpecial) AccentPink.copy(alpha = 0.15f) else Color(0xFF1E1E1E)),
                 contentAlignment = Alignment.Center
@@ -1286,11 +1270,11 @@ fun DrawerMenuItem(
                     icon,
                     contentDescription = null,
                     tint = if (isSpecial) AccentOrange else TextWhite,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(17.dp)
                 )
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -1302,7 +1286,7 @@ fun DrawerMenuItem(
                 Text(
                     text = subtitle,
                     color = TextDim,
-                    fontSize = 11.sp
+                    fontSize = 10.sp
                 )
             }
         }
@@ -1320,26 +1304,27 @@ fun TrackRowItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(54.dp)
             .clickable(onClick = onClick)
             .background(if (isCurrent) Color(0xFF1B1422) else Color.Transparent)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = "${index + 1}",
-            fontSize = 13.sp,
+            fontSize = 12.sp,
             color = if (isCurrent) AccentOrange else TextMuted,
-            modifier = Modifier.width(26.dp)
+            modifier = Modifier.width(24.dp)
         )
 
         AuraPulseDot(isCurrent = isCurrent, isPlaying = isPlaying)
 
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(10.dp))
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = track.title,
-                fontSize = 14.sp,
+                fontSize = 13.sp,
                 fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
                 color = TextWhite,
                 maxLines = 1,
@@ -1347,7 +1332,7 @@ fun TrackRowItem(
             )
             Text(
                 text = track.artist,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 color = if (isCurrent) AccentOrange else TextDim,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -1356,12 +1341,13 @@ fun TrackRowItem(
 
         Text(
             text = "%02d:%02d".format(track.durationSec / 60, track.durationSec % 60),
-            fontSize = 12.sp,
+            fontSize = 11.sp,
             color = TextMuted
         )
     }
 }
 
+// GPU Katmanı (graphicsLayer) ile Sıfır Compose Recomposition Maliyetli Nabız Animasyonu
 @Composable
 fun AuraPulseDot(isCurrent: Boolean, isPlaying: Boolean) {
     if (isCurrent && isPlaying) {
@@ -1377,14 +1363,15 @@ fun AuraPulseDot(isCurrent: Boolean, isPlaying: Boolean) {
         )
         Box(
             modifier = Modifier
-                .size(10.dp)
+                .size(9.dp)
                 .clip(CircleShape)
-                .background(AccentPink.copy(alpha = alpha))
+                .graphicsLayer { this.alpha = alpha }
+                .background(AccentPink)
         )
     } else {
         Box(
             modifier = Modifier
-                .size(6.dp)
+                .size(5.dp)
                 .clip(CircleShape)
                 .background(if (isCurrent) AccentOrange else Color.Transparent)
         )
@@ -1407,42 +1394,42 @@ fun FloatingPlayerDock(
     onSeek: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val currentPos by currentPositionFlow.collectAsState()
-    val duration by durationFlow.collectAsState()
-
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
+        shape = RoundedCornerShape(18.dp),
         color = BgCard.copy(alpha = 0.96f),
-        border = BorderStroke(1.dp, BorderDark),
-        shadowElevation = 12.dp
+        border = BorderStroke(1.dp, BorderDark)
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(46.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(8.dp))
                         .background(Color(0xFF222222)),
                     contentAlignment = Alignment.Center
                 ) {
                     AsyncImage(
-                        model = track.albumArtUri,
+                        model = ImageRequest.Builder(LocalContext.current)
+                            .data(track.albumArtUri)
+                            .crossfade(false)
+                            .size(100, 100)
+                            .build(),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
 
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(10.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = track.title,
-                        fontSize = 14.sp,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         color = TextWhite,
                         maxLines = 1,
@@ -1450,30 +1437,30 @@ fun FloatingPlayerDock(
                     )
                     Text(
                         text = track.artist,
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         color = AccentOrange,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                IconButton(onClick = onToggleShuffle, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = onToggleShuffle, modifier = Modifier.size(30.dp)) {
                     Icon(
                         Icons.Default.Shuffle,
                         contentDescription = "Karışık",
                         tint = if (isShuffle) AccentOrange else TextMuted,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
 
-                IconButton(onClick = onPrev, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onPrev, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.SkipPrevious, contentDescription = "Önceki", tint = TextWhite)
                 }
 
                 IconButton(
                     onClick = onTogglePlay,
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(38.dp)
                         .clip(CircleShape)
                         .background(Brush.linearGradient(listOf(AccentOrange, AccentPink)))
                 ) {
@@ -1481,52 +1468,71 @@ fun FloatingPlayerDock(
                         if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = "Oynat/Duraklat",
                         tint = TextWhite,
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
 
-                IconButton(onClick = onNext, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onNext, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Default.SkipNext, contentDescription = "Sonraki", tint = TextWhite)
                 }
 
-                IconButton(onClick = onToggleRepeat, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = onToggleRepeat, modifier = Modifier.size(30.dp)) {
                     Icon(
                         Icons.Default.Repeat,
                         contentDescription = "Tekrar",
                         tint = if (isRepeat) AccentPink else TextMuted,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            Slider(
-                value = if (duration > 0) currentPos.toFloat() / duration else 0f,
-                onValueChange = { onSeek((it * duration).toInt()) },
-                colors = SliderDefaults.colors(
-                    thumbColor = AccentOrange,
-                    activeTrackColor = AccentPink,
-                    inactiveTrackColor = BorderDark
-                ),
-                modifier = Modifier.height(18.dp)
+            // Yalnızca Slider'ı recompose eden izole bileşen (60 FPS pürüzsüz kaydırma)
+            PlayerProgressSlider(
+                currentPositionFlow = currentPositionFlow,
+                durationFlow = durationFlow,
+                onSeek = onSeek
             )
+        }
+    }
+}
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "%02d:%02d".format(currentPos / 60, currentPos % 60),
-                    fontSize = 11.sp,
-                    color = TextMuted
-                )
-                Text(
-                    text = "%02d:%02d".format(duration / 60, duration % 60),
-                    fontSize = 11.sp,
-                    color = TextMuted
-                )
-            }
+@Composable
+fun PlayerProgressSlider(
+    currentPositionFlow: MutableStateFlow<Int>,
+    durationFlow: MutableStateFlow<Int>,
+    onSeek: (Int) -> Unit
+) {
+    val currentPos by currentPositionFlow.collectAsState()
+    val duration by durationFlow.collectAsState()
+
+    Column {
+        Slider(
+            value = if (duration > 0) currentPos.toFloat() / duration else 0f,
+            onValueChange = { onSeek((it * duration).toInt()) },
+            colors = SliderDefaults.colors(
+                thumbColor = AccentOrange,
+                activeTrackColor = AccentPink,
+                inactiveTrackColor = BorderDark
+            ),
+            modifier = Modifier.height(16.dp)
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "%02d:%02d".format(currentPos / 60, currentPos % 60),
+                fontSize = 10.sp,
+                color = TextMuted
+            )
+            Text(
+                text = "%02d:%02d".format(duration / 60, duration % 60),
+                fontSize = 10.sp,
+                color = TextMuted
+            )
         }
     }
 }
@@ -1536,11 +1542,11 @@ fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(10.dp))
             .background(BgCard)
-            .border(0.5.dp, BorderDark, RoundedCornerShape(12.dp))
-            .padding(12.dp)
+            .border(0.5.dp, BorderDark, RoundedCornerShape(10.dp))
+            .padding(10.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1548,14 +1554,14 @@ fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (dlProgress.isDone) "İNDİRME TAMAMLANDI" else "PARÇA İNDİRİLİYOR",
-                    fontSize = 10.sp,
+                    text = if (dlProgress.isDone) "İNDİRME TAMAMLANDI" else "PARÇA İNDİRİLİYOR (MYT HIZI)",
+                    fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (dlProgress.isDone) AccentOrange else AccentPink
                 )
                 Text(
                     text = dlProgress.title,
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = TextWhite,
                     maxLines = 1,
@@ -1564,25 +1570,25 @@ fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
             }
             Text(
                 text = "%${dlProgress.percent}",
-                fontSize = 15.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 color = AccentOrange
             )
             if (dlProgress.isRunning) {
-                Spacer(modifier = Modifier.width(8.dp))
-                IconButton(onClick = onCancel, modifier = Modifier.size(24.dp)) {
+                Spacer(modifier = Modifier.width(6.dp))
+                IconButton(onClick = onCancel, modifier = Modifier.size(20.dp)) {
                     Icon(Icons.Default.Close, contentDescription = "İptal", tint = TextMuted)
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(5.dp)
-                .clip(RoundedCornerShape(3.dp))
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
                 .background(Color(0xFF202020))
         ) {
             Box(
@@ -1615,16 +1621,16 @@ fun YouTubeDownloadSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .padding(horizontal = 14.dp, vertical = 6.dp)
                 .fillMaxHeight(0.85f)
         ) {
             Text(
-                text = "Müzik Ara ve İndir (YouTube Innertube)",
-                fontSize = 18.sp,
+                text = "Müzik Ara ve Anında İndir",
+                fontSize = 17.sp,
                 fontWeight = FontWeight.Bold,
                 color = TextWhite
             )
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
@@ -1658,56 +1664,60 @@ fun YouTubeDownloadSheet(
                     colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Ara", fontWeight = FontWeight.Bold)
+                    Text("Ara", fontWeight = FontWeight.Bold, color = Color.Black)
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             if (isLoading) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(160.dp),
+                    modifier = Modifier.fillMaxWidth().height(140.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator(color = AccentOrange)
                 }
             } else if (hasSearched && results.isEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(160.dp),
+                    modifier = Modifier.fillMaxWidth().height(140.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("Sonuç bulunamadı veya bağlantı kurulamadı.", color = TextDim, fontSize = 14.sp)
+                    Text("Sonuç bulunamadı.", color = TextDim, fontSize = 13.sp)
                 }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 30.dp)
+                    contentPadding = PaddingValues(bottom = 24.dp)
                 ) {
                     itemsIndexed(results, key = { _, item -> item.videoId }) { _, item ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onDownload(item) }
-                                .padding(vertical = 10.dp),
+                                .padding(vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             AsyncImage(
-                                model = item.thumbnailUrl,
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data(item.thumbnailUrl)
+                                    .crossfade(false)
+                                    .size(120, 90)
+                                    .build(),
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
-                                    .size(54.dp, 40.dp)
+                                    .size(50.dp, 38.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(Color(0xFF222222))
                             )
 
-                            Spacer(modifier = Modifier.width(12.dp))
+                            Spacer(modifier = Modifier.width(10.dp))
 
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = item.title,
                                     color = TextWhite,
-                                    fontSize = 14.sp,
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -1715,7 +1725,7 @@ fun YouTubeDownloadSheet(
                                 Text(
                                     text = "${item.artist} • ${item.durationText}",
                                     color = TextDim,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
