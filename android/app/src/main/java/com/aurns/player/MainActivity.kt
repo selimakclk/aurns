@@ -17,6 +17,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -40,6 +41,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -352,17 +354,39 @@ fun MainScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { isDrawerOpen = true }) {
-                    Icon(Icons.Default.Menu, contentDescription = "Menü", tint = TextWhite)
+                    Box {
+                        Icon(Icons.Default.Menu, contentDescription = "Menü", tint = TextWhite)
+                        if (pendingRequests.isNotEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(AccentOrange)
+                                    .align(Alignment.TopEnd)
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(4.dp))
 
+                // Windows ΛURNS ile %100 Birebir Neon Logo Amblemi
+                Image(
+                    painter = painterResource(id = R.drawable.app_logo),
+                    contentDescription = "ΛURNS Logo",
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                )
+
+                Spacer(modifier = Modifier.width(8.dp))
+
                 Text(
                     text = "Λ U R N S",
-                    fontSize = 19.sp,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextWhite,
-                    letterSpacing = 2.sp
+                    letterSpacing = 2.5.sp
                 )
 
                 Spacer(modifier = Modifier.weight(1f))
@@ -1148,13 +1172,28 @@ fun DrawerContent(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Λ U R N S",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = TextWhite,
-                    letterSpacing = 3.sp
+                Image(
+                    painter = painterResource(id = R.drawable.app_logo),
+                    contentDescription = "ΛURNS Logo",
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(8.dp))
                 )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "Λ U R N S",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = TextWhite,
+                        letterSpacing = 2.5.sp
+                    )
+                    Text(
+                        text = "0.5 MB Bellek • Saf Hız • v1.1.0",
+                        fontSize = 11.sp,
+                        color = AccentOrange
+                    )
+                }
                 Spacer(modifier = Modifier.weight(1f))
                 IconButton(onClick = onClose) {
                     Icon(Icons.Default.Close, contentDescription = "Kapat", tint = TextMuted)
@@ -1164,8 +1203,8 @@ fun DrawerContent(
             Text(
                 text = "$trackCount yerel parça",
                 fontSize = 11.sp,
-                color = AccentOrange,
-                modifier = Modifier.padding(start = 2.dp, bottom = 14.dp)
+                color = TextMuted,
+                modifier = Modifier.padding(start = 2.dp, top = 6.dp, bottom = 14.dp)
             )
 
             HorizontalDivider(color = BorderDark, thickness = 0.5.dp)
@@ -1340,6 +1379,24 @@ fun TrackRowItem(
             )
         }
 
+        // Windows ΛURNS ile %100 Birebir Neon Durum Rozeti (ÇALIYOR / DURAKLAT)
+        if (isCurrent) {
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFF20121E),
+                border = BorderStroke(1.dp, AccentPink.copy(alpha = 0.7f)),
+                modifier = Modifier.padding(end = 8.dp)
+            ) {
+                Text(
+                    text = if (isPlaying) "ÇALIYOR" else "DURAKLAT",
+                    color = AccentOrange,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+
         Text(
             text = "%02d:%02d".format(track.durationSec / 60, track.durationSec % 60),
             fontSize = 11.sp,
@@ -1408,21 +1465,29 @@ fun FloatingPlayerDock(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(44.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF222222)),
+                        .background(Color(0xFF141418)),
                     contentAlignment = Alignment.Center
                 ) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(track.albumArtUri)
-                            .crossfade(false)
-                            .size(100, 100)
-                            .build(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    if (track.albumArtUri != null) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(LocalContext.current)
+                                .data(track.albumArtUri)
+                                .crossfade(false)
+                                .size(100, 100)
+                                .build(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Image(
+                            painter = painterResource(id = R.drawable.app_logo),
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(10.dp))
