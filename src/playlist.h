@@ -33,5 +33,6 @@ void Playlist_SplitArtistSong(const wchar_t *fullTitle, wchar_t *outArtist, int 
 void Playlist_ExtractYouTubeId(const wchar_t *filePath, wchar_t *outId, int maxLen);
 int  Playlist_FindBestMatch(const wchar_t *targetTitle, const wchar_t *targetYtId);
 BOOL Playlist_IsSameTrack(int index, const wchar_t *targetTitle, const wchar_t *targetYtId);
+BOOL Playlist_MatchesQuery(int index, const wchar_t *query);
 
 #endif // PLAYLIST_H

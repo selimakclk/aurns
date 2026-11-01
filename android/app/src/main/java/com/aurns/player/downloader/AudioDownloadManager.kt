@@ -278,4 +278,86 @@ class AudioDownloadManager(private val context: Context) {
         downloadJob = null
         _currentProgress.value = DownloadProgress("", 0, isRunning = false)
     }
+
+    // Uygulama İçi Canlı APK Güncelleyici (Windows src/updater.c WM_APP_UPDATE_PROGRESS ile %100 Birebir)
+    fun startApkUpdateDownload(
+        primaryUrl: String,
+        fallbackUrl: String,
+        versionStr: String,
+        onApkReady: (File) -> Unit
+    ) {
+        downloadJob?.cancel()
+        downloadJob = scope.launch {
+            val headline = "ΛURNS GÜNCELLENİYOR"
+            val title = "Yeni sürüm indiriliyor (v$versionStr)..."
+            _currentProgress.value = DownloadProgress(title, 2, isRunning = true, headline = headline)
+
+            val apkFile = File(context.cacheDir, "Aurns-update.apk")
+            if (apkFile.exists()) apkFile.delete()
+
+            suspend fun tryDownloadUrl(targetUrl: String): Boolean {
+                return try {
+                    val req = Request.Builder()
+                        .url("$targetUrl?t=${System.currentTimeMillis()}")
+                        .header("Accept", "*/*")
+                        .build()
+                    client.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) return false
+                        val body = resp.body ?: return false
+                        val totalLen = body.contentLength()
+                        var downloaded = 0L
+                        var lastPct = 2
+                        body.byteStream().use { input ->
+                            FileOutputStream(apkFile).use { output ->
+                                val buf = ByteArray(64 * 1024)
+                                while (isActive) {
+                                    val read = input.read(buf)
+                                    if (read == -1) break
+                                    output.write(buf, 0, read)
+                                    downloaded += read
+                                    val pct = if (totalLen > 0) {
+                                        ((downloaded * 99L) / totalLen).toInt().coerceIn(2, 99)
+                                    } else {
+                                        ((downloaded * 95L) / (14L * 1024L * 1024L)).toInt().coerceIn(2, 95)
+                                    }
+                                    if (pct > lastPct) {
+                                        lastPct = pct
+                                        _currentProgress.value = DownloadProgress(title, pct, isRunning = true, headline = headline)
+                                    }
+                                }
+                                output.flush()
+                            }
+                        }
+                        apkFile.exists() && apkFile.length() > 512 * 1024
+                    }
+                } catch (_: Exception) {
+                    false
+                }
+            }
+
+            val ok = tryDownloadUrl(primaryUrl) || (fallbackUrl != primaryUrl && tryDownloadUrl(fallbackUrl))
+            if (!isActive) return@launch
+
+            if (ok) {
+                _currentProgress.value = DownloadProgress(
+                    title = "v$versionStr indirildi, kurulum başlatılıyor...",
+                    percent = 100,
+                    isRunning = false,
+                    isDone = true,
+                    headline = "✓ GÜNCELLEME HAZIR"
+                )
+                withContext(Dispatchers.Main) {
+                    onApkReady(apkFile)
+                }
+            } else {
+                _currentProgress.value = DownloadProgress(
+                    title = "Güncelleme paketi indirilemedi.",
+                    percent = 0,
+                    isRunning = false,
+                    error = "Bağlantı hatası",
+                    headline = headline
+                )
+            }
+        }
+    }
 }

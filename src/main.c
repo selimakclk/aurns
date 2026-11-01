@@ -1057,8 +1057,7 @@ static void ApplyFilter(const wchar_t *query) {
             }
         }
         for (int i = 0; i < total && g_filterCount < g_filterCap; i++) {
-            const PlaylistItem *item = Playlist_Get(i);
-            if (item && StrStrIW(item->title, query)) {
+            if (Playlist_MatchesQuery(i, query)) {
                 g_filterIndices[g_filterCount++] = i;
             }
         }
@@ -2299,10 +2298,16 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
                 DrawSmoothCircle(dotCx, dotCy, SF(2.5f), RGB(60, 60, 70), 180);
             }
 
-            // Sağ Durum Rozeti (Çalan satırda)
-            int textRight = rcRow.right - S(12);
+            // Sağ Seçenekler Düğmesi (⋮) ve Durum Rozeti (Android ile %100 Birebir)
+            RECT rcMoreBtn = { rcRow.right - S(34), midRowY - S(14), rcRow.right - S(6), midRowY + S(14) };
+            SetBkMode(hdc, TRANSPARENT);
+            SelectObject(hdc, g_hFontIconsSmall);
+            SetTextColor(hdc, isHovered ? COLOR_TEXT_WHITE : COLOR_TEXT_DIM);
+            DrawUiText(hdc, L"\uE712", &rcMoreBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            int textRight = rcMoreBtn.left - S(6);
             if (isPlayingTrack && w >= S(460)) {
-                RECT rcPill = { rcRow.right - S(76), midRowY - S(11), rcRow.right - S(10), midRowY + S(11) };
+                RECT rcPill = { rcMoreBtn.left - S(72), midRowY - S(11), rcMoreBtn.left - S(6), midRowY + S(11) };
                 DrawSmoothRoundRect(&rcPill, S(11), RGB(32, 18, 30), 255, COLOR_ACCENT_PINK, 160);
                 SelectObject(hdc, g_hFontMicro);
                 SetTextColor(hdc, COLOR_ACCENT_ORANGE);
@@ -4468,9 +4473,34 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 return 0;
             }
 
-            // 6. Şarkı Satırına Basma (Pointer-Down Anında Vurgu, Bırakınca Çalma / Sürükleyince Sıralama)
+            // 6. Şarkı Satırına Basma (Pointer-Down Anında Vurgu, ⋮ Düğmesi Menü, Bırakınca Çalma / Sürükleyince Sıralama)
             int actualIdx = HitTestTrackRowIndex(hWnd, pt, NULL);
             if (actualIdx >= 0) {
+                RECT rcCli;
+                GetClientRect(hWnd, &rcCli);
+                if (pt.x >= rcCli.right - S(46)) {
+                    g_selectedTrack = actualIdx;
+                    g_pressedZone = ZONE_NONE;
+                    ReleaseCapture();
+                    InvalidateRect(hWnd, NULL, FALSE);
+
+                    HMENU hMenu = CreatePopupMenu();
+                    if (hMenu) {
+                        AppendMenuW(hMenu, MF_STRING, IDM_CTX_PLAY,        L"Şimdi Çal");
+                        AppendMenuW(hMenu, MF_STRING, IDM_CTX_COPY_TITLE,  L"Parça Adını Kopyala");
+                        AppendMenuW(hMenu, MF_STRING, IDM_CTX_OPEN_FOLDER, L"Dosya Konumunu Aç");
+                        AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                        AppendMenuW(hMenu, MF_STRING, IDM_CTX_REMOVE,      L"Listeden Kaldır");
+                        AppendMenuW(hMenu, MF_STRING, IDM_CTX_DELETE_DISK, L"Cihazdan Sil");
+
+                        POINT scrPt = pt;
+                        ClientToScreen(hWnd, &scrPt);
+                        TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, scrPt.x, scrPt.y, 0, hWnd, NULL);
+                        DestroyMenu(hMenu);
+                    }
+                    return 0;
+                }
+
                 g_pressedTrack = actualIdx;
                 g_selectedTrack = actualIdx;
                 g_dragFromIndex = actualIdx;

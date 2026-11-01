@@ -1049,3 +1049,17 @@ BOOL Playlist_IsSameTrack(int index, const wchar_t *targetTitle, const wchar_t *
 
     return (Playlist_FindBestMatch(targetTitle, targetYtId) == index);
 }
+
+BOOL Playlist_MatchesQuery(int index, const wchar_t *query) {
+    if (index < 0 || index >= g_count) return FALSE;
+    if (!query || !query[0]) return TRUE;
+    if (StrStrIW(g_items[index].title, query) != NULL) return TRUE;
+
+    wchar_t fTitle[256], fQuery[128];
+    FoldForMatchW(g_items[index].title, fTitle, 256);
+    FoldForMatchW(query, fQuery, 128);
+    if (fQuery[0] && fTitle[0] && wcsstr(fTitle, fQuery) != NULL) {
+        return TRUE;
+    }
+    return FALSE;
+}

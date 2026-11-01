@@ -1,6 +1,6 @@
-1.3.0
+1.4.0
 https://raw.githubusercontent.com/selimakclk/aurns/main/Aurns.exe
-- Sınırsız Kişilik Canlı Jam Odası: 2 kişi sınırı kaldırıldı; telefonlar ve bilgisayarlar aynı anda tek odada buluşabilir ve aktif odaya yeni arkadaşlar davet edilebilir.
-- Eksik Şarkı Canlı Yakalama (Milisaniye Senkronizasyonu): Jam'de sende olmayan şarkı arka planda otomatik indirilir ve 00:00 yerine tam canlı çalınan saniyeden başlar.
-- Akıllı Çalma Listesi Paylaşımı (.m3u8 / .aurns): Paylaşılan listedeki eksik parçalar otomatik indirilir.
-- %100 Bilgisayar ve Telefon Özellik Eşitliği: 3 aşamalı tekrar modu, klasör seçimi, parça sağ tık / uzun basma menüsü ve canlı güncelleme denetimi.
+- %100 İkiz Platform Eşitliği (Bilgisayar & Telefon Birebir Aynı): Arayüz renkleri, sütun başlıkları, her zaman görünür alt oynatıcı, Sunset-Neon 3 renkli ilerleme çubuğu, aura noktaları ve tüm menüler piksel piksel eşitlendi.
+- Uygulama İçi Canlı Güncelleyici (PC & Android): Açılışta otomatik sürüm denetimi ve hem bilgisayarda hem telefonda uygulama içinden yüzdeli canlı güncelleme indirme/kurma.
+- Sınırsız Kişilik Canlı Jam Odası & Satır İçi Etiket Düzenleme: Sınırsız katılımcılı canlı Jam odası, eksik şarkıda milisaniye yakalama ve kart içi anında isim düzenleme.
+- Türkçe Karakter Duyarsız Akıllı Arama & Paylaşılan Çalma Listesi (.m3u8 / .aurns).
