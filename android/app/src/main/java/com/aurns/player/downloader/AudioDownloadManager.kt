@@ -117,37 +117,40 @@ class AudioDownloadManager(private val context: Context) {
                         return@launch
                     }
 
-                    // 4. Android Medya Depolamasına (Scoped Storage / MediaStore) Güvenli Aktarım
+                    // 4. Android Medya Depolamasına (Scoped Storage / MediaStore & App Storage) Güvenli Aktarım
+                    var savedSuccessfully = false
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val resolver = context.contentResolver
-                        // Aynı isimde eski kayıt varsa çakışmayı önlemek için temizle
                         try {
-                            val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} = ?"
-                            val selectionArgs = arrayOf(safeFileName)
-                            resolver.delete(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, selection, selectionArgs)
-                        } catch (_: Exception) {}
+                            val resolver = context.contentResolver
+                            try {
+                                val selection = "${MediaStore.Audio.Media.DISPLAY_NAME} = ?"
+                                val selectionArgs = arrayOf(safeFileName)
+                                resolver.delete(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, selection, selectionArgs)
+                            } catch (_: Exception) {}
 
-                        val contentValues = ContentValues().apply {
-                            put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
-                            put(MediaStore.Audio.Media.TITLE, title)
-                            put(MediaStore.Audio.Media.ARTIST, artist)
-                            put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
-                            put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/Aurns")
-                            put(MediaStore.Audio.Media.IS_PENDING, 1)
-                        }
-
-                        val mediaUri = resolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
-                        if (mediaUri != null) {
-                            resolver.openOutputStream(mediaUri)?.use { destOut ->
-                                tempFile.inputStream().use { srcIn ->
-                                    srcIn.copyTo(destOut)
-                                }
+                            val contentValues = ContentValues().apply {
+                                put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
+                                put(MediaStore.Audio.Media.TITLE, title)
+                                put(MediaStore.Audio.Media.ARTIST, artist)
+                                put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
+                                put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/Aurns")
+                                put(MediaStore.Audio.Media.IS_PENDING, 1)
                             }
-                            contentValues.clear()
-                            contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
-                            resolver.update(mediaUri, contentValues, null, null)
-                        } else {
-                            saveToFallback(tempFile, safeFileName)
+
+                            val mediaUri = resolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, contentValues)
+                            if (mediaUri != null) {
+                                resolver.openOutputStream(mediaUri)?.use { destOut ->
+                                    tempFile.inputStream().use { srcIn ->
+                                        srcIn.copyTo(destOut)
+                                    }
+                                }
+                                contentValues.clear()
+                                contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                                resolver.update(mediaUri, contentValues, null, null)
+                                savedSuccessfully = true
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
                         }
                     } else {
                         // Android 9 ve altı
@@ -162,10 +165,13 @@ class AudioDownloadManager(private val context: Context) {
                                 arrayOf("audio/mp4", "audio/m4a"),
                                 null
                             )
-                        } catch (_: Exception) {
-                            saveToFallback(tempFile, safeFileName)
-                        }
+                            savedSuccessfully = true
+                        } catch (_: Exception) {}
                     }
+
+                    // Her durumda garanti yerel uygulama klasörüne de kopyala (Sıfır İzin & Sıfır EPERM Garantisi)
+                    saveToFallback(tempFile, safeFileName)
+                    savedSuccessfully = true
 
                     _currentProgress.value = DownloadProgress(title, 100, isRunning = false, isDone = true)
 

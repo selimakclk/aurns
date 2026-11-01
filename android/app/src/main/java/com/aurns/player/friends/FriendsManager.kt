@@ -12,6 +12,7 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 data class FriendItem(
@@ -30,8 +31,13 @@ data class FriendRequest(
 
 data class JamRoomState(
     val isActive: Boolean = false,
-    val roomCode: String = "",
+    val isInviting: Boolean = false,
+    val hasIncomingInvite: Boolean = false,
+    val inviterTag: String = "",
+    val inviterName: String = "",
     val partnerTag: String = "",
+    val partnerName: String = "",
+    val jamId: String = "",
     val currentTrackTitle: String = "",
     val isPlaying: Boolean = false,
     val positionSec: Int = 0
@@ -56,7 +62,7 @@ class FriendsManager(private val context: Context) {
     private val _pendingRequests = MutableStateFlow<List<FriendRequest>>(emptyList())
     val pendingRequests: StateFlow<List<FriendRequest>> = _pendingRequests.asStateFlow()
 
-    // Jam Canlı Senkronizasyon Durumu
+    // Jam Canlı Senkronizasyon Durumu (Windows ve Android Birebir Uyumlu)
     private val _jamState = MutableStateFlow(JamRoomState())
     val jamState: StateFlow<JamRoomState> = _jamState.asStateFlow()
 
@@ -72,10 +78,14 @@ class FriendsManager(private val context: Context) {
     private var localIsPlaying = false
     private var localTrackTitle = ""
 
-    // Jam dinleyici callback'i
+    // Jam dinleyici callback'leri
     var onRemoteJamPlayRequest: ((title: String, posSec: Int) -> Unit)? = null
+    var onRemoteJamPosRequest: ((playFlag: Int, posSec: Int) -> Unit)? = null
 
-    private val BROKERS = listOf("broker.emqx.io", "broker.hivemq.com")
+    // Kullanıcı varlık / çevrimiçi kontrol sorguları
+    private val pendingUserQueries = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+
+    private val BROKERS = listOf("broker.hivemq.com", "broker.emqx.io")
 
     init {
         loadFromPrefs()
@@ -88,7 +98,7 @@ class FriendsManager(private val context: Context) {
         var name = prefs.getString("my_name", "") ?: ""
 
         if (tag.isBlank()) {
-            val deviceModel = Build.MODEL.replace(Regex("[^a-zA-Z0-9]"), "").take(10).ifEmpty { "Android" }
+            val deviceModel = Build.MODEL.replace(Regex("[^a-zA-Z0-9çğıöşüÇĞİÖŞÜ]"), "").take(10).ifEmpty { "Android" }
             val num = 1000 + Random.nextInt(9000)
             tag = "$deviceModel#$num"
             name = deviceModel
@@ -127,11 +137,13 @@ class FriendsManager(private val context: Context) {
         _pendingRequests.value = pList
     }
 
+    // KULLANICI ADINI GÜNCELLEME (Etiket Numarası #1234 Bizim Verdiğimiz Sabit Kimliktir, Asla Değişmez)
     fun updateMyName(newName: String) {
-        val clean = newName.trim().take(24)
+        val clean = newName.trim().replace(Regex("[^a-zA-Z0-9çğıöşüÇĞİÖŞÜ_-]"), "").take(20)
         if (clean.isNotBlank()) {
             _myName.value = clean
             val tag = _myTag.value
+            // # ile başlayan numara sabit kalır!
             val hashPart = if (tag.contains("#")) "#" + tag.substringAfter("#") else "#${1000 + Random.nextInt(9000)}"
             val newTag = "$clean$hashPart"
             _myTag.value = newTag
@@ -168,7 +180,7 @@ class FriendsManager(private val context: Context) {
             .apply()
     }
 
-    private fun tagToTopicKey(tag: String): String {
+    fun tagToTopicKey(tag: String): String {
         return tag.lowercase(Locale.ROOT)
             .replace('#', '_')
             .replace('+', '_')
@@ -186,7 +198,7 @@ class FriendsManager(private val context: Context) {
                 try {
                     val s = Socket()
                     s.connect(InetSocketAddress(brokerHost, 1883), 5000)
-                    s.soTimeout = 45000 // 45 saniye zaman aşımı
+                    s.soTimeout = 45000
                     socket = s
                     outputStream = s.getOutputStream()
                     val inputStream = s.getInputStream()
@@ -196,12 +208,6 @@ class FriendsManager(private val context: Context) {
 
                     _isConnected.value = true
                     subscribeToMyInbox()
-
-                    // Eğer aktif bir Jam odasındaysak tekrar abone ol
-                    val curJam = _jamState.value
-                    if (curJam.isActive && curJam.roomCode.isNotEmpty()) {
-                        sendMqttSubscribe(outputStream, "seloplayer/j/${curJam.roomCode}")
-                    }
 
                     // Arkadaşların canlı durumunu iste
                     requestAllStatuses()
@@ -223,7 +229,6 @@ class FriendsManager(private val context: Context) {
         }
     }
 
-    // MQTT KeepAlive PINGREQ paketi (0xC0 0x00) her 20 saniyede bir gönderilir (Bağlantı asla kopmaz)
     private fun startKeepAliveLoop() {
         scope.launch {
             while (isActive) {
@@ -281,7 +286,6 @@ class FriendsManager(private val context: Context) {
         val myKey = tagToTopicKey(_myTag.value)
         val myInbox = "seloplayer/u/$myKey"
 
-        // 1. Kendi Gelen Kutusu Mesajları
         if (topic.equals(myInbox, ignoreCase = true)) {
             val parts = payload.split("|")
             if (parts.isEmpty()) return
@@ -324,19 +328,24 @@ class FriendsManager(private val context: Context) {
                 "PING" -> {
                     if (parts.size >= 2) {
                         val fromTag = parts[1]
+                        // Kim sorarsa sorsun canli oldugumuzu bildirmek icin aninda PONG ile yanitla!
                         sendPong(fromTag)
                     }
                 }
 
                 // Durum Yanıtı: PONG|fromTag|fromName|isPlaying|currentTrack
                 "PONG" -> {
-                    if (parts.size >= 5) {
+                    if (parts.size >= 3) {
                         val fromTag = parts[1]
                         val fromName = parts[2]
-                        val isPlay = parts[3] == "1"
-                        val track = parts[4].ifEmpty { if (isPlay) "Müzik Çalıyor" else "Çevrimiçi" }
+                        val isPlay = parts.getOrNull(3) == "1"
+                        val track = parts.getOrNull(4)?.ifEmpty { if (isPlay) "Müzik Çalıyor" else "Çevrimiçi" } ?: "Çevrimiçi"
 
                         updateFriendStatus(fromTag, fromName, isOnline = true, isPlaying = isPlay, currentTrack = track)
+
+                        // Varlik / cevrimici sorgusu yapan coroutine'i tetikle
+                        val key = tagToTopicKey(fromTag)
+                        pendingUserQueries[key]?.complete(true)
                     }
                 }
 
@@ -348,36 +357,96 @@ class FriendsManager(private val context: Context) {
                     }
                 }
 
-                // Jam Daveti: JAM_INVITE|fromTag|fromName|roomCode
-                "JAM_INVITE" -> {
+                // ==================== JAM PROTOKOLÜ (WINDOWS & ANDROID BİREBİR) ====================
+
+                // 1. JAM DAVETİ: JAM_INV|fromTag|fromName|jamId (veya JAM_INVITE)
+                "JAM_INV", "JAM_INVITE" -> {
                     if (parts.size >= 4) {
                         val fromTag = parts[1]
-                        val roomCode = parts[3]
-                        joinJamRoom(roomCode, fromTag)
+                        val fromName = parts[2]
+                        val jamId = parts[3]
+                        if (fromTag != _myTag.value) {
+                            _jamState.value = _jamState.value.copy(
+                                hasIncomingInvite = true,
+                                inviterTag = fromTag,
+                                inviterName = fromName,
+                                jamId = jamId
+                            )
+                        }
                     }
                 }
-            }
-        }
 
-        // 2. Canlı Jam Oda Mesajları (seloplayer/j/<roomCode>)
-        if (topic.startsWith("seloplayer/j/") && _jamState.value.isActive) {
-            try {
-                val json = JSONObject(payload)
-                val title = json.optString("title", "")
-                val isPlay = json.optBoolean("playing", false)
-                val pos = json.optInt("posSec", 0)
-
-                _jamState.value = _jamState.value.copy(
-                    currentTrackTitle = title,
-                    isPlaying = isPlay,
-                    positionSec = pos
-                )
-
-                if (title.isNotEmpty() && title != localTrackTitle) {
-                    onRemoteJamPlayRequest?.invoke(title, pos)
+                // 2. JAM KABUL: JAM_JOIN|fromTag|fromName|jamId
+                "JAM_JOIN" -> {
+                    if (parts.size >= 4) {
+                        val fromTag = parts[1]
+                        val fromName = parts[2]
+                        val jamId = parts[3]
+                        val curJam = _jamState.value
+                        if (curJam.isInviting && curJam.partnerTag.equals(fromTag, ignoreCase = true)) {
+                            _jamState.value = JamRoomState(
+                                isActive = true,
+                                isInviting = false,
+                                partnerTag = fromTag,
+                                partnerName = fromName,
+                                jamId = jamId
+                            )
+                            // Aktif parcayi hemen partnerimize gonder
+                            if (localTrackTitle.isNotEmpty()) {
+                                broadcastJamState(localTrackTitle, localIsPlaying, 0)
+                            }
+                        }
+                    }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
+
+                // 3. JAM RED: JAM_REJ|fromTag|jamId
+                "JAM_REJ" -> {
+                    val curJam = _jamState.value
+                    if (curJam.isInviting) {
+                        _jamState.value = JamRoomState()
+                    }
+                }
+
+                // 4. JAM AYRIL: JAM_LEAVE|fromTag|jamId
+                "JAM_LEAVE" -> {
+                    _jamState.value = JamRoomState()
+                }
+
+                // 5. JAM ŞARKI DURUMU: JAM_STATE|fromTag|jamId|isPlaying|posSec|ytId|trackTitle
+                "JAM_STATE" -> {
+                    val curJam = _jamState.value
+                    if (curJam.isActive && parts.size >= 7) {
+                        val isPlay = parts[3] == "1"
+                        val posSec = parts[4].toIntOrNull() ?: 0
+                        val title = parts[6]
+
+                        _jamState.value = curJam.copy(
+                            currentTrackTitle = title,
+                            isPlaying = isPlay,
+                            positionSec = posSec
+                        )
+
+                        if (title.isNotEmpty()) {
+                            onRemoteJamPlayRequest?.invoke(title, posSec)
+                        }
+                    }
+                }
+
+                // 6. JAM POZİSYON / DURAKLAT / SAR: JAM_POS|fromTag|jamId|playFlag|posSec
+                "JAM_POS" -> {
+                    val curJam = _jamState.value
+                    if (curJam.isActive && parts.size >= 5) {
+                        val playFlag = parts[3].toIntOrNull() ?: 0
+                        val posSec = parts[4].toIntOrNull() ?: 0
+
+                        _jamState.value = curJam.copy(
+                            isPlaying = (playFlag == 1),
+                            positionSec = posSec
+                        )
+
+                        onRemoteJamPosRequest?.invoke(playFlag, posSec)
+                    }
+                }
             }
         }
     }
@@ -398,25 +467,47 @@ class FriendsManager(private val context: Context) {
         }
     }
 
-    // ==================== ARKADAŞ EYLEMLERİ ====================
+    // ==================== KULLANICI ARAMA & ARKADAŞ EKLEME ====================
 
-    fun sendFriendRequest(targetTag: String): Boolean {
+    suspend fun checkUserAndSendRequest(targetTag: String): Result<String> {
         val clean = targetTag.trim()
-        if (clean.isBlank() || !clean.contains("#") || clean.equals(_myTag.value, ignoreCase = true)) {
-            return false
+        if (clean.isBlank() || !clean.contains("#")) {
+            return Result.failure(Exception("Etiket '#' içermelidir (Örn: Selim#1234)"))
+        }
+        if (clean.equals(_myTag.value, ignoreCase = true)) {
+            return Result.failure(Exception("Kendinize arkadaşlık isteği gönderemezsiniz!"))
         }
         if (_friends.value.any { it.tag.equals(clean, ignoreCase = true) }) {
-            return false
+            return Result.failure(Exception("Bu kullanıcı zaten arkadaş listenizde!"))
         }
 
         val targetKey = tagToTopicKey(clean)
         val topic = "seloplayer/u/$targetKey"
-        val payload = "REQ|${_myTag.value}|${_myName.value}"
 
-        scope.launch {
-            sendMqttPublish(outputStream, topic, payload)
+        val queryDeferred = CompletableDeferred<Boolean>()
+        pendingUserQueries[targetKey] = queryDeferred
+
+        try {
+            // Kullaniciyi ag uzerinden canli sorgulamak icin PING gonder
+            val pingPayload = "PING|${_myTag.value}|${_myName.value}"
+            sendMqttPublish(outputStream, topic, pingPayload)
+
+            // 2.2 saniye boyunca kullanicidan PONG yaniti bekle
+            val isFound = withTimeoutOrNull(2200) {
+                queryDeferred.await()
+            } ?: false
+
+            if (!isFound) {
+                return Result.failure(Exception("Böyle bir kullanıcı yok veya şu an çevrimdışı!"))
+            }
+
+            // Kullanici bulundu, istek paketini ilet
+            val reqPayload = "REQ|${_myTag.value}|${_myName.value}"
+            sendMqttPublish(outputStream, topic, reqPayload)
+            return Result.success("İstek başarıyla gönderildi!")
+        } finally {
+            pendingUserQueries.remove(targetKey)
         }
-        return true
     }
 
     fun acceptFriendRequest(targetTag: String) {
@@ -487,63 +578,114 @@ class FriendsManager(private val context: Context) {
         localIsPlaying = isPlaying
         localTrackTitle = trackTitle
 
-        // Çevrimiçi tüm arkadaşlara anında yeni çalan şarkıyı bildir
+        // Çevrimiçi tüm arkadaşlara bildir
         for (f in _friends.value) {
             sendPong(f.tag)
         }
 
-        // Eğer Jam odasındaysak odaya da canlı durumu yayınla
+        // Eğer aktif Jam oturumundaysak partnere anında bildir
         if (_jamState.value.isActive) {
             broadcastJamState(trackTitle, isPlaying, 0)
         }
     }
 
-    // ==================== JAM CANLI SENKRONİZASYON ====================
+    // ==================== JAM CANLI SENKRONİZASYON (CROSS-PLATFORM) ====================
 
-    fun joinJamRoom(roomCode: String, partnerTag: String = "") {
-        val cleanRoom = roomCode.trim().uppercase()
-        if (cleanRoom.isEmpty()) return
+    fun inviteFriendToJam(friendTag: String, friendName: String = "") {
+        if (friendTag.isBlank()) return
+        val partnerKey = tagToTopicKey(friendTag)
+        val myKey = tagToTopicKey(_myTag.value)
+        val jamId = "jam_${myKey}_${System.currentTimeMillis() % 1000000}"
 
-        leaveJamRoom()
-        _jamState.value = JamRoomState(isActive = true, roomCode = cleanRoom, partnerTag = partnerTag)
+        _jamState.value = JamRoomState(
+            isActive = false,
+            isInviting = true,
+            partnerTag = friendTag,
+            partnerName = if (friendName.isNotBlank()) friendName else friendTag,
+            jamId = jamId
+        )
 
+        // Windows ve Android uyumlu JAM_INV paketi
+        val payload = "JAM_INV|${_myTag.value}|${_myName.value}|$jamId"
         scope.launch {
-            sendMqttSubscribe(outputStream, "seloplayer/j/$cleanRoom")
+            sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
         }
     }
 
-    fun inviteFriendToJam(friendTag: String) {
-        val myRoom = "JAM_${1000 + Random.nextInt(9000)}"
-        joinJamRoom(myRoom, friendTag)
+    fun acceptJamInvite() {
+        val st = _jamState.value
+        if (!st.hasIncomingInvite || st.inviterTag.isBlank()) return
 
-        val targetKey = tagToTopicKey(friendTag)
-        val topic = "seloplayer/u/$targetKey"
-        val payload = "JAM_INVITE|${_myTag.value}|${_myName.value}|$myRoom"
+        val partnerTag = st.inviterTag
+        val partnerName = st.inviterName
+        val jamId = st.jamId
 
+        _jamState.value = JamRoomState(
+            isActive = true,
+            isInviting = false,
+            hasIncomingInvite = false,
+            partnerTag = partnerTag,
+            partnerName = partnerName,
+            jamId = jamId
+        )
+
+        // Windows ve Android uyumlu JAM_JOIN paketi
+        val partnerKey = tagToTopicKey(partnerTag)
+        val payload = "JAM_JOIN|${_myTag.value}|${_myName.value}|$jamId"
         scope.launch {
-            sendMqttPublish(outputStream, topic, payload)
+            sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
+        }
+
+        if (localTrackTitle.isNotEmpty()) {
+            broadcastJamState(localTrackTitle, localIsPlaying, 0)
         }
     }
 
-    fun broadcastJamState(title: String, isPlaying: Boolean, posSec: Int) {
-        val room = _jamState.value.roomCode
-        if (room.isEmpty() || !_jamState.value.isActive) return
+    fun rejectJamInvite() {
+        val st = _jamState.value
+        if (!st.hasIncomingInvite) return
+
+        val partnerKey = tagToTopicKey(st.inviterTag)
+        val payload = "JAM_REJ|${_myTag.value}|${st.jamId}"
+        _jamState.value = JamRoomState()
 
         scope.launch {
-            val json = JSONObject().apply {
-                put("title", title)
-                put("playing", isPlaying)
-                put("posSec", posSec)
-                put("time", System.currentTimeMillis())
-            }
-            sendMqttPublish(outputStream, "seloplayer/j/$room", json.toString())
+            sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
         }
     }
 
     fun leaveJamRoom() {
-        val room = _jamState.value.roomCode
-        if (room.isNotEmpty()) {
-            _jamState.value = JamRoomState()
+        val st = _jamState.value
+        if (st.isActive && st.partnerTag.isNotBlank()) {
+            val partnerKey = tagToTopicKey(st.partnerTag)
+            val payload = "JAM_LEAVE|${_myTag.value}|${st.jamId}"
+            scope.launch {
+                sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
+            }
+        }
+        _jamState.value = JamRoomState()
+    }
+
+    fun broadcastJamState(title: String, isPlaying: Boolean, posSec: Int) {
+        val st = _jamState.value
+        if (!st.isActive || st.partnerTag.isBlank()) return
+
+        val partnerKey = tagToTopicKey(st.partnerTag)
+        val cleanTitle = title.replace('|', '-')
+        val payload = "JAM_STATE|${_myTag.value}|${st.jamId}|${if (isPlaying) 1 else 0}|$posSec||$cleanTitle"
+        scope.launch {
+            sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
+        }
+    }
+
+    fun broadcastJamPos(playFlag: Int, posSec: Int) {
+        val st = _jamState.value
+        if (!st.isActive || st.partnerTag.isBlank()) return
+
+        val partnerKey = tagToTopicKey(st.partnerTag)
+        val payload = "JAM_POS|${_myTag.value}|${st.jamId}|$playFlag|$posSec"
+        scope.launch {
+            sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
         }
     }
 
@@ -563,17 +705,16 @@ class FriendsManager(private val context: Context) {
         val cidBytes = clientId.toByteArray(Charsets.UTF_8)
         val remLen = 10 + 2 + cidBytes.size
         val pkt = ByteArray(2 + remLen)
-        var i = 0
-        pkt[i++] = 0x10.toByte() // CONNECT
-        pkt[i++] = remLen.toByte()
-        pkt[i++] = 0x00.toByte(); pkt[i++] = 0x04.toByte()
-        pkt[i++] = 'M'.code.toByte(); pkt[i++] = 'Q'.code.toByte(); pkt[i++] = 'T'.code.toByte(); pkt[i++] = 'T'.code.toByte()
-        pkt[i++] = 0x04.toByte() // Level 4
-        pkt[i++] = 0x02.toByte() // Clean Session
-        pkt[i++] = 0x00.toByte(); pkt[i++] = 0x1E.toByte() // 30s KeepAlive
-        pkt[i++] = (cidBytes.size shr 8).toByte()
-        pkt[i++] = (cidBytes.size and 0xFF).toByte()
-        System.arraycopy(cidBytes, 0, pkt, i, cidBytes.size)
+        pkt[0] = 0x10.toByte() // CONNECT
+        pkt[1] = remLen.toByte()
+        pkt[2] = 0x00.toByte(); pkt[3] = 0x04.toByte()
+        pkt[4] = 'M'.code.toByte(); pkt[5] = 'Q'.code.toByte(); pkt[6] = 'T'.code.toByte(); pkt[7] = 'T'.code.toByte()
+        pkt[8] = 0x04.toByte() // Level 4 (3.1.1)
+        pkt[9] = 0x02.toByte() // Clean Session
+        pkt[10] = 0x00.toByte(); pkt[11] = 0x1E.toByte() // 30s KeepAlive
+        pkt[12] = (cidBytes.size shr 8).toByte()
+        pkt[13] = (cidBytes.size and 0xFF).toByte()
+        System.arraycopy(cidBytes, 0, pkt, 14, cidBytes.size)
 
         synchronized(out) {
             out.write(pkt)
@@ -582,44 +723,54 @@ class FriendsManager(private val context: Context) {
     }
 
     private fun sendMqttSubscribe(out: OutputStream?, topic: String) {
-        if (out == null) return
+        if (out == null || topic.isBlank()) return
         val topBytes = topic.toByteArray(Charsets.UTF_8)
         val remLen = 2 + 2 + topBytes.size + 1
         val pkt = ByteArray(2 + remLen)
-        var i = 0
-        pkt[i++] = 0x82.toByte() // SUBSCRIBE
-        pkt[i++] = remLen.toByte()
-        pkt[i++] = 0x00.toByte(); pkt[i++] = 0x01.toByte() // Packet ID
-        pkt[i++] = (topBytes.size shr 8).toByte()
-        pkt[i++] = (topBytes.size and 0xFF).toByte()
-        System.arraycopy(topBytes, 0, pkt, i, topBytes.size)
-        i += topBytes.size
-        pkt[i] = 0x00.toByte() // QoS 0
+        pkt[0] = 0x82.toByte() // SUBSCRIBE (QoS 1)
+        pkt[1] = remLen.toByte()
+        pkt[2] = 0x00.toByte(); pkt[3] = 0x01.toByte() // Packet ID = 1
+        pkt[4] = (topBytes.size shr 8).toByte()
+        pkt[5] = (topBytes.size and 0xFF).toByte()
+        System.arraycopy(topBytes, 0, pkt, 6, topBytes.size)
+        pkt[pkt.size - 1] = 0x00.toByte() // Requested QoS 0
 
-        synchronized(out) {
-            out.write(pkt)
-            out.flush()
+        try {
+            synchronized(out) {
+                out.write(pkt)
+                out.flush()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
     private fun sendMqttPublish(out: OutputStream?, topic: String, payload: String) {
-        if (out == null) return
+        if (out == null || topic.isBlank()) return
+        val topBytes = topic.toByteArray(Charsets.UTF_8)
+        val payBytes = payload.toByteArray(Charsets.UTF_8)
+        val remLen = 2 + topBytes.size + payBytes.size
+
+        val header = mutableListOf<Byte>()
+        header.add(0x30.toByte()) // PUBLISH (QoS 0)
+        var x = remLen
+        do {
+            var encodedByte = (x % 128).toByte()
+            x /= 128
+            if (x > 0) encodedByte = (encodedByte.toInt() or 0x80).toByte()
+            header.add(encodedByte)
+        } while (x > 0)
+
+        val pkt = ByteArray(header.size + remLen)
+        for (i in header.indices) pkt[i] = header[i]
+        var idx = header.size
+        pkt[idx++] = (topBytes.size shr 8).toByte()
+        pkt[idx++] = (topBytes.size and 0xFF).toByte()
+        System.arraycopy(topBytes, 0, pkt, idx, topBytes.size)
+        idx += topBytes.size
+        System.arraycopy(payBytes, 0, pkt, idx, payBytes.size)
+
         try {
-            val topBytes = topic.toByteArray(Charsets.UTF_8)
-            val payBytes = payload.toByteArray(Charsets.UTF_8)
-            val remLen = 2 + topBytes.size + payBytes.size
-            if (remLen > 4000) return
-
-            val pkt = ByteArray(2 + remLen)
-            var i = 0
-            pkt[i++] = 0x30.toByte() // PUBLISH QoS 0
-            pkt[i++] = remLen.toByte()
-            pkt[i++] = (topBytes.size shr 8).toByte()
-            pkt[i++] = (topBytes.size and 0xFF).toByte()
-            System.arraycopy(topBytes, 0, pkt, i, topBytes.size)
-            i += topBytes.size
-            System.arraycopy(payBytes, 0, pkt, i, payBytes.size)
-
             synchronized(out) {
                 out.write(pkt)
                 out.flush()

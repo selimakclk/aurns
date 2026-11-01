@@ -268,6 +268,10 @@ static RECT rcFriendRemoveBtns[MAX_FRIENDS];
 static RECT rcReqAcceptBtns[MAX_REQUESTS];
 static RECT rcReqRejectBtns[MAX_REQUESTS];
 
+static BOOL    g_isCheckingUser = FALSE;
+static DWORD   g_checkUserStartTick = 0;
+static wchar_t g_checkTargetTag[64] = {0};
+
 // =============================================================================
 // YAZI TİPİ VE YÜKSEK DPI YÖNETİMİ (TEK GEÇİŞLİ ÖNBELLEKLİ SORGULAMA)
 // =============================================================================
@@ -938,15 +942,17 @@ static void UpdateTimerSchedule(HWND hWnd) {
             g_dlBannerAnim  = (g_dlMode != DL_BANNER_NONE) ? 1.0f : 0.0f;
             g_scrollPosPx   = g_scrollTargetPx;
         }
-        if (Player_IsPlaying() || Jam_GetState() != JAM_STATE_NONE || g_dlFinishHideTick != 0) {
-            SetTimer(hWnd, IDT_UPDATE_TIMER, 500, NULL);
+        if (g_isCheckingUser || Player_IsPlaying() || Jam_GetState() != JAM_STATE_NONE || g_dlFinishHideTick != 0) {
+            SetTimer(hWnd, IDT_UPDATE_TIMER, 200, NULL);
         } else {
             KillTimer(hWnd, IDT_UPDATE_TIMER);
         }
         return;
     }
 
-    if (Player_IsPlaying() || g_dlFinishHideTick != 0) {
+    if (g_isCheckingUser) {
+        SetTimer(hWnd, IDT_UPDATE_TIMER, 200, NULL);
+    } else if (Player_IsPlaying() || g_dlFinishHideTick != 0) {
         SetTimer(hWnd, IDT_UPDATE_TIMER, 500, NULL);
     } else if (Jam_GetState() != JAM_STATE_NONE || (g_sidebarOpen && g_sidebarView == SIDEBAR_VIEW_FRIENDS)) {
         SetTimer(hWnd, IDT_UPDATE_TIMER, 1500, NULL);
@@ -1558,6 +1564,8 @@ static void ExportPlaylistDialog(void) {
 }
 
 static void SubmitFriendRequest(HWND hWnd) {
+    if (g_isCheckingUser) return;
+
     wchar_t inTag[64] = {0};
     GetWindowTextW(g_hFriendAddEdit, inTag, 63);
     StrTrimW(inTag, L" \t\r\n");
@@ -1565,14 +1573,41 @@ static void SubmitFriendRequest(HWND hWnd) {
 
     if (tlen == 0) {
         wcscpy(g_friendAddMsg, L"Lütfen bir kullanıcı etiketi yazın.");
-    } else if (wcschr(inTag, L'#') == NULL) {
-        wcscpy(g_friendAddMsg, L"Etiket '#' içermelidir (Örn: Selim#8421)");
-    } else if (Friends_SendRequest(inTag)) {
-        wcscpy(g_friendAddMsg, L"✓ Arkadaşlık isteği gönderildi!");
-        SetWindowTextW(g_hFriendAddEdit, L"");
-    } else {
-        wcscpy(g_friendAddMsg, L"İstek gönderilemedi. Etiketi veya interneti kontrol edin.");
+        InvalidateRect(hWnd, NULL, FALSE);
+        return;
     }
+    if (wcschr(inTag, L'#') == NULL) {
+        wcscpy(g_friendAddMsg, L"Etiket '#' içermelidir (Örn: Selim#8421)");
+        InvalidateRect(hWnd, NULL, FALSE);
+        return;
+    }
+
+    wchar_t myTag[32] = {0};
+    Friends_GetMyTag(myTag, 32);
+    if (_wcsicmp(inTag, myTag) == 0) {
+        wcscpy(g_friendAddMsg, L"Kendinize istek gönderemezsiniz.");
+        InvalidateRect(hWnd, NULL, FALSE);
+        return;
+    }
+
+    for (int i = 0; i < Friends_GetFriendCount(); i++) {
+        const FriendItem *f = Friends_GetFriend(i);
+        if (f && _wcsicmp(f->tag, inTag) == 0) {
+            wcscpy(g_friendAddMsg, L"Bu kullanıcı zaten arkadaş listenizde.");
+            InvalidateRect(hWnd, NULL, FALSE);
+            return;
+        }
+    }
+
+    // Kullanicinin var olup olmadigini ag uzerinden sorgula
+    g_isCheckingUser = TRUE;
+    g_checkUserStartTick = GetTickCount();
+    wcsncpy(g_checkTargetTag, inTag, 63);
+    wcscpy(g_friendAddMsg, L"Kullanıcı aranıyor...");
+    Friends_ProbeUser(inTag);
+
+    StartAnimLoop(hWnd);
+    UpdateTimerSchedule(hWnd);
     InvalidateRect(hWnd, NULL, FALSE);
 }
 
@@ -3177,6 +3212,22 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     return 0;
                 }
                 DWORD now = GetTickCount();
+
+                if (g_isCheckingUser) {
+                    if (Friends_CheckUserFound(g_checkTargetTag)) {
+                        Friends_SendRequest(g_checkTargetTag);
+                        wcscpy(g_friendAddMsg, L"✓ İstek gönderildi!");
+                        SetWindowTextW(g_hFriendAddEdit, L"");
+                        g_isCheckingUser = FALSE;
+                        UpdateTimerSchedule(hWnd);
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    } else if (now - g_checkUserStartTick > 2200) {
+                        wcscpy(g_friendAddMsg, L"Böyle bir kullanıcı yok veya çevrimdışı!");
+                        g_isCheckingUser = FALSE;
+                        UpdateTimerSchedule(hWnd);
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                }
 
                 if (g_dlFinishHideTick != 0 && (int)(now - g_dlFinishHideTick) >= 0) {
                     g_dlFinishHideTick = 0;

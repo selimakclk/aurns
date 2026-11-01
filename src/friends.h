@@ -26,12 +26,17 @@ void Friends_Save(void);
 
 void Friends_GetMyTag(wchar_t *buf, int maxLen);
 void Friends_GetMyName(wchar_t *buf, int maxLen);
+void Friends_SetMyName(const wchar_t *newName);
 
 int  Friends_GetFriendCount(void);
 const FriendItem* Friends_GetFriend(int index);
 
 int  Friends_GetPendingCount(void);
 const FriendRequest* Friends_GetPending(int index);
+
+// Kullanici arama / varlik kontrolu
+void Friends_ProbeUser(const wchar_t *targetTag);
+BOOL Friends_CheckUserFound(const wchar_t *targetTag);
 
 BOOL Friends_SendRequest(const wchar_t *targetTag);
 BOOL Friends_AcceptRequest(const wchar_t *targetTag);

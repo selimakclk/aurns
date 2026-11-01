@@ -106,14 +106,35 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Şarkı kütüphaneye eklendi!", Toast.LENGTH_SHORT).show()
         }
 
-        // Arkadaş Jam üzerinden şarkı senkronize ettiğinde
+        // Arkadaş Jam üzerinden şarkı senkronize ettiğinde (Phone <-> Phone & Phone <-> PC)
         friendsManager.onRemoteJamPlayRequest = { title, posSec ->
-            val idx = tracks.indexOfFirst { it.title.contains(title, ignoreCase = true) }
-            if (idx != -1) {
-                playTrack(idx)
-                if (posSec > 0) seekTo(posSec)
-            } else {
-                Toast.makeText(this, "Arkadaşın '$title' çalıyor", Toast.LENGTH_SHORT).show()
+            runOnUiThread {
+                val idx = tracks.indexOfFirst {
+                    it.title.contains(title, ignoreCase = true) || title.contains(it.title, ignoreCase = true)
+                }
+                if (idx != -1) {
+                    playTrack(idx)
+                    if (posSec > 0) seekTo(posSec)
+                    Toast.makeText(this, "Jam: '$title' senkronize edildi", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Jam: Arkadaşın '$title' çalıyor", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        // Arkadaş Jam üzerinden duraklattığında, başlattığında veya sardığında
+        friendsManager.onRemoteJamPosRequest = { playFlag, posSec ->
+            runOnUiThread {
+                if (posSec >= 0) {
+                    mediaController?.seekTo(posSec * 1000L)
+                }
+                if (playFlag == 0) {
+                    mediaController?.pause()
+                    isPlaying = false
+                } else if (playFlag == 1) {
+                    mediaController?.play()
+                    isPlaying = true
+                }
             }
         }
 
@@ -225,14 +246,17 @@ class MainActivity : ComponentActivity() {
 
     private fun togglePlayPause() {
         mediaController?.let { p ->
+            val curPos = (p.currentPosition / 1000).toInt()
             if (p.isPlaying) {
                 p.pause()
                 val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
                 friendsManager.updateLocalPlaybackState(false, title)
+                friendsManager.broadcastJamPos(0, curPos)
             } else {
                 p.play()
                 val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
                 friendsManager.updateLocalPlaybackState(true, title)
+                friendsManager.broadcastJamPos(1, curPos)
             }
         }
     }
@@ -240,7 +264,9 @@ class MainActivity : ComponentActivity() {
     private fun seekTo(sec: Int) {
         mediaController?.seekTo(sec * 1000L)
         if (currentTrackIndex in tracks.indices) {
-            friendsManager.broadcastJamState(tracks[currentTrackIndex].title, isPlaying, sec)
+            val title = tracks[currentTrackIndex].title
+            friendsManager.broadcastJamState(title, isPlaying, sec)
+            friendsManager.broadcastJamPos(-1, sec)
         }
     }
 
@@ -489,6 +515,129 @@ fun MainScreen(
             // EVRENSEL CANLI İNDİRME ÇUBUĞU (MYT Hızı & Gerçek Zamanlı %)
             AnimatedVisibility(visible = dlProgress.isRunning || dlProgress.isDone || dlProgress.error != null) {
                 DownloadProgressBanner(dlProgress = dlProgress, onCancel = { downloadManager.cancelActiveDownload() })
+            }
+
+            // GELEN JAM DAVETİ BİLDİRİMİ (Phone <-> Phone & Phone <-> PC)
+            AnimatedVisibility(visible = jamState.hasIncomingInvite) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF26142A),
+                    border = BorderStroke(1.5.dp, AccentPink),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(Brush.linearGradient(listOf(AccentOrange, AccentPink))),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.GroupAdd, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${jamState.inviterName} seni Jam'e davet etti!",
+                                color = TextWhite,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Birlikte aynı şarkıyı canlı dinleyin",
+                                color = TextDim,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            onClick = { friendsManager.acceptJamInvite() },
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF34C759)
+                        ) {
+                            Text(
+                                text = "Kabul Et",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            onClick = { friendsManager.rejectJamInvite() },
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF2B2B2B)
+                        ) {
+                            Text(
+                                text = "Reddet",
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // AKTİF JAM OTURUMU BİLGİ BANDI (Phone <-> Phone & Phone <-> PC)
+            AnimatedVisibility(visible = jamState.isActive) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFF1E1428),
+                    border = BorderStroke(1.dp, Brush.horizontalGradient(listOf(AccentOrange, AccentPink))),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(AccentPink)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🎧 JAM AKTİF • ${jamState.partnerName}",
+                                color = TextWhite,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (jamState.currentTrackTitle.isNotEmpty()) "Çalıyor: ${jamState.currentTrackTitle}" else "Senkronize müzik çalınıyor",
+                                color = AccentOrange,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Surface(
+                            onClick = { friendsManager.leaveJamRoom() },
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF33151E),
+                            border = BorderStroke(0.5.dp, Color(0xFFFF3B30))
+                        ) {
+                            Text(
+                                text = "Ayrıl",
+                                color = Color(0xFFFF453A),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+                }
             }
 
             // ŞARKI LİSTESİ (Sıfır Kasıntı, Doğru Şarkı Çalma Düzeltmesi)
@@ -916,6 +1065,11 @@ fun FriendsPanelScreen(
                 }
 
                 2 -> {
+                    val addScope = rememberCoroutineScope()
+                    var isCheckingUser by remember { mutableStateOf(false) }
+                    var checkStatusMessage by remember { mutableStateOf<String?>(null) }
+                    var isCheckError by remember { mutableStateOf(false) }
+
                     Column(
                         modifier = Modifier.fillMaxWidth().weight(1f)
                     ) {
@@ -936,9 +1090,13 @@ fun FriendsPanelScreen(
 
                         OutlinedTextField(
                             value = addTagInput,
-                            onValueChange = { addTagInput = it.take(30) },
+                            onValueChange = {
+                                addTagInput = it.take(30)
+                                checkStatusMessage = null
+                            },
                             placeholder = { Text("Örn: Ahmet#1234", color = TextMuted) },
                             singleLine = true,
+                            enabled = !isCheckingUser,
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(12.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -955,21 +1113,74 @@ fun FriendsPanelScreen(
 
                         Button(
                             onClick = {
-                                if (friendsManager.sendFriendRequest(addTagInput)) {
-                                    Toast.makeText(context, "Arkadaşlık isteği gönderildi!", Toast.LENGTH_SHORT).show()
-                                    addTagInput = ""
-                                    selectedTab = 0
-                                } else {
-                                    Toast.makeText(context, "Geçersiz etiket veya zaten ekli!", Toast.LENGTH_SHORT).show()
+                                if (addTagInput.isBlank()) {
+                                    checkStatusMessage = "Lütfen bir kullanıcı etiketi girin!"
+                                    isCheckError = true
+                                    return@Button
+                                }
+                                addScope.launch {
+                                    isCheckingUser = true
+                                    checkStatusMessage = null
+                                    val res = friendsManager.checkUserAndSendRequest(addTagInput)
+                                    isCheckingUser = false
+                                    if (res.isSuccess) {
+                                        checkStatusMessage = "✓ İstek gönderildi!"
+                                        isCheckError = false
+                                        addTagInput = ""
+                                    } else {
+                                        checkStatusMessage = "Böyle bir kullanıcı yok veya çevrimdışı!"
+                                        isCheckError = true
+                                    }
                                 }
                             },
+                            enabled = !isCheckingUser,
                             colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth().height(46.dp)
                         ) {
-                            Icon(Icons.Default.PersonAdd, contentDescription = null, tint = Color.Black)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Arkadaşlık İsteği Gönder", color = Color.Black, fontWeight = FontWeight.Bold)
+                            if (isCheckingUser) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = Color.Black,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Kullanıcı Aranıyor...", color = Color.Black, fontWeight = FontWeight.Bold)
+                            } else {
+                                Icon(Icons.Default.PersonAdd, contentDescription = null, tint = Color.Black)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Arkadaşlık İsteği Gönder", color = Color.Black, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        // Canlı Durum Bildirim Kartı
+                        if (checkStatusMessage != null) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isCheckError) Color(0x33FF3B30) else Color(0x3334C759),
+                                border = BorderStroke(1.dp, if (isCheckError) Color(0xFFFF3B30) else Color(0xFF34C759)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (isCheckError) Icons.Default.Close else Icons.Default.Check,
+                                        contentDescription = null,
+                                        tint = if (isCheckError) Color(0xFFFF453A) else Color(0xFF30D158),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = checkStatusMessage ?: "",
+                                        color = if (isCheckError) Color(0xFFFF453A) else Color(0xFF30D158),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
                         }
                     }
                 }

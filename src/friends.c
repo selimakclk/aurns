@@ -20,6 +20,9 @@ static int g_pendingCount = 0;
 static BOOL    g_localIsPlaying = FALSE;
 static wchar_t g_localTrack[128] = {0};
 
+static void SendPingToTag(const wchar_t *targetTag);
+static void SendPongToTag(const wchar_t *targetTag);
+
 static void GetFriendsFilePath(wchar_t *outPath, int maxLen) {
     GetModuleFileNameW(NULL, outPath, maxLen);
     PathRemoveFileSpecW(outPath);
@@ -280,6 +283,62 @@ void Friends_GetMyName(wchar_t *buf, int maxLen) {
         wcsncpy(buf, g_myName, maxLen - 1);
         buf[maxLen - 1] = L'\0';
     }
+}
+
+void Friends_SetMyName(const wchar_t *newName) {
+    if (!newName || !newName[0]) return;
+    wchar_t clean[64] = {0};
+    int cIdx = 0;
+    for (int i = 0; newName[i] && cIdx < 24; i++) {
+        if (newName[i] > 32 && newName[i] != L'#' && newName[i] != L'\"' && newName[i] != L'|') {
+            clean[cIdx++] = newName[i];
+        }
+    }
+    clean[cIdx] = L'\0';
+    if (!clean[0]) return;
+
+    wcsncpy(g_myName, clean, 63);
+    g_myName[63] = L'\0';
+
+    // Etiket numarasi (#1234) bizim tarafimizdan verilen kimliktir, asla degismez!
+    const wchar_t *hashPart = wcschr(g_myTag, L'#');
+    if (hashPart) {
+        _snwprintf(g_myTag, 31, L"%s%s", clean, hashPart);
+    } else {
+        _snwprintf(g_myTag, 31, L"%s#%04d", clean, 1000 + (rand() % 9000));
+    }
+    g_myTag[31] = L'\0';
+
+    Friends_Save();
+
+    char myNewKey[64] = {0};
+    Network_TagToTopicKeyW(g_myTag, myNewKey, sizeof(myNewKey));
+    char inbox[160];
+    snprintf(inbox, sizeof(inbox), "seloplayer/u/%s", myNewKey);
+    Network_Subscribe(inbox);
+    Friends_RequestAllStatuses();
+}
+
+static wchar_t g_lastProbedTag[32] = {0};
+static BOOL    g_lastProbedFound = FALSE;
+static DWORD   g_lastProbedTick = 0;
+
+void Friends_ProbeUser(const wchar_t *targetTag) {
+    if (!targetTag || !targetTag[0]) return;
+    wcsncpy(g_lastProbedTag, targetTag, 31);
+    g_lastProbedTag[31] = L'\0';
+    g_lastProbedFound = FALSE;
+    g_lastProbedTick = GetTickCount();
+
+    SendPingToTag(targetTag);
+}
+
+BOOL Friends_CheckUserFound(const wchar_t *targetTag) {
+    if (!targetTag || !targetTag[0]) return FALSE;
+    if (_wcsicmp(g_lastProbedTag, targetTag) == 0 && g_lastProbedFound) {
+        return TRUE;
+    }
+    return FALSE;
 }
 
 int Friends_GetFriendCount(void) {
@@ -605,8 +664,9 @@ void Friends_HandleNetworkMessage(const char *topic, const char *payload) {
             if (wName[0] && wcscmp(g_friends[idx].name, wName) != 0) {
                 wcsncpy(g_friends[idx].name, wName, 63);
             }
-            SendPongToTag(g_friends[idx].tag);
         }
+        // Kullanici aramasinda canli oldugumuzu bildirmek icin PONG gonder
+        SendPongToTag(wTag);
     }
     // 4. PONG|fromTag|fromName|isPlaying|trackTitle
     else if (strncmp(payload, "PONG|", 5) == 0) {
@@ -632,6 +692,13 @@ void Friends_HandleNetworkMessage(const char *topic, const char *payload) {
 
         wchar_t wTag[32] = {0};
         wchar_t wName[64] = {0};
+        MultiByteToWideChar(CP_UTF8, 0, tag, -1, wTag, 31);
+        MultiByteToWideChar(CP_UTF8, 0, name, -1, wName, 63);
+
+        // Kullanici arama / varlik kontrolu yapiliyorsa kullaniciyi bulundu olarak isaretle
+        if (g_lastProbedTag[0] && _wcsicmp(g_lastProbedTag, wTag) == 0) {
+            g_lastProbedFound = TRUE;
+        }
         MultiByteToWideChar(CP_UTF8, 0, tag, -1, wTag, 31);
         MultiByteToWideChar(CP_UTF8, 0, name, -1, wName, 63);
 
