@@ -948,24 +948,44 @@ fun FriendsPanelScreen(
                         )
                     }
 
-                    Surface(
-                        onClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Aurns Tag", myTag))
-                            isCopied = true
-                            Toast.makeText(context, "Etiket kopyalandı!", Toast.LENGTH_SHORT).show()
-                        },
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (isCopied) AccentOrange else Color(0xFF1E1E1E),
-                        border = BorderStroke(0.5.dp, BorderDark)
-                    ) {
-                        Text(
-                            text = if (isCopied) "✓ Kopyalandı" else "Kopyala",
-                            color = if (isCopied) Color.Black else TextWhite,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                        )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            onClick = {
+                                newNameInput = myName
+                                isEditNameOpen = true
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF1E1E1E),
+                            border = BorderStroke(0.5.dp, BorderDark)
+                        ) {
+                            Text(
+                                text = "Düzenle",
+                                color = AccentOrange,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                            )
+                        }
+
+                        Surface(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Aurns Tag", myTag))
+                                isCopied = true
+                                Toast.makeText(context, "Etiket kopyalandı!", Toast.LENGTH_SHORT).show()
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isCopied) AccentOrange else Color(0xFF1E1E1E),
+                            border = BorderStroke(0.5.dp, BorderDark)
+                        ) {
+                            Text(
+                                text = if (isCopied) "✓ Kopyalandı" else "Kopyala",
+                                color = if (isCopied) Color.Black else TextWhite,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -1192,18 +1212,27 @@ fun FriendsPanelScreen(
             AlertDialog(
                 onDismissRequest = { isEditNameOpen = false },
                 containerColor = BgCard,
-                title = { Text("Görünen Adını Değiştir", color = TextWhite, fontWeight = FontWeight.Bold) },
+                title = { Text("Kişisel Kullanıcı Adı", color = TextWhite, fontWeight = FontWeight.Bold) },
                 text = {
-                    OutlinedTextField(
-                        value = newNameInput,
-                        onValueChange = { newNameInput = it.take(20) },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = TextWhite,
-                            unfocusedTextColor = TextWhite,
-                            focusedBorderColor = AccentOrange
+                    Column {
+                        Text(
+                            text = "İsmini serbestçe değiştirebilirsin ancak sistemin atadığı #${myTag.substringAfter("#", "1234")} kimliğin sabittir ve asla değişmez.",
+                            color = TextDim,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(bottom = 12.dp)
                         )
-                    )
+                        OutlinedTextField(
+                            value = newNameInput,
+                            onValueChange = { newNameInput = it.take(20) },
+                            singleLine = true,
+                            placeholder = { Text("Yeni kullanıcı adın...", color = TextMuted) },
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = TextWhite,
+                                unfocusedTextColor = TextWhite,
+                                focusedBorderColor = AccentOrange
+                            )
+                        )
+                    }
                 },
                 confirmButton = {
                     Button(
@@ -1215,7 +1244,7 @@ fun FriendsPanelScreen(
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = AccentOrange)
                     ) {
-                        Text("Kaydet", color = Color.Black)
+                        Text("✓ Kaydet", color = Color.Black, fontWeight = FontWeight.Bold)
                     }
                 },
                 dismissButton = {

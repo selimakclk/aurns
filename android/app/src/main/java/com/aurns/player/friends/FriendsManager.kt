@@ -93,20 +93,63 @@ class FriendsManager(private val context: Context) {
         startKeepAliveLoop()
     }
 
+    private fun getDeterministicTagNumber(): Int {
+        val androidId = try {
+            android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: ""
+        } catch (_: Exception) { "" }
+
+        val seedSource = if (androidId.isNotBlank() && androidId != "9774d56d682e549c") {
+            androidId
+        } else {
+            "${Build.BOARD}_${Build.BRAND}_${Build.DEVICE}_${Build.MODEL}_${Build.MANUFACTURER}"
+        }
+        val seed = Math.abs(seedSource.hashCode())
+        return 1000 + (seed % 9000)
+    }
+
+    private fun saveIdentityFile(tag: String, name: String) {
+        try {
+            val identityFile = java.io.File(context.filesDir, "aurns_identity.tag")
+            identityFile.writeText("$tag\n$name")
+        } catch (_: Exception) {}
+    }
+
     private fun loadFromPrefs() {
         var tag = prefs.getString("my_tag", "") ?: ""
         var name = prefs.getString("my_name", "") ?: ""
 
+        val identityFile = java.io.File(context.filesDir, "aurns_identity.tag")
+        if (identityFile.exists()) {
+            try {
+                val lines = identityFile.readLines()
+                if (lines.isNotEmpty()) {
+                    val fileTag = lines[0].trim()
+                    val fileName = if (lines.size > 1) lines[1].trim() else fileTag.substringBefore("#")
+                    if (tag.isBlank() && fileTag.isNotBlank()) {
+                        tag = fileTag
+                        name = fileName
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
         if (tag.isBlank()) {
             val deviceModel = Build.MODEL.replace(Regex("[^a-zA-Z0-9çğıöşüÇĞİÖŞÜ]"), "").take(10).ifEmpty { "Android" }
-            val num = 1000 + Random.nextInt(9000)
+            val num = getDeterministicTagNumber()
             tag = "$deviceModel#$num"
             name = deviceModel
-            prefs.edit().putString("my_tag", tag).putString("my_name", name).apply()
+        }
+
+        // Tag her zaman kalıcı numarasını korur
+        if (!tag.contains("#")) {
+            val num = getDeterministicTagNumber()
+            tag = "$tag#$num"
         }
 
         _myTag.value = tag
         _myName.value = name
+        prefs.edit().putString("my_tag", tag).putString("my_name", name).apply()
+        saveIdentityFile(tag, name)
 
         // Arkadaş listesini yükle
         val friendsJson = prefs.getString("friends_json", "[]") ?: "[]"
@@ -143,11 +186,16 @@ class FriendsManager(private val context: Context) {
         if (clean.isNotBlank()) {
             _myName.value = clean
             val tag = _myTag.value
-            // # ile başlayan numara sabit kalır!
-            val hashPart = if (tag.contains("#")) "#" + tag.substringAfter("#") else "#${1000 + Random.nextInt(9000)}"
-            val newTag = "$clean$hashPart"
+            // # ile başlayan numara sistem tarafından atanan kalıcı kimliktir, asla değişmez!
+            val num = if (tag.contains("#")) {
+                tag.substringAfter("#")
+            } else {
+                getDeterministicTagNumber().toString()
+            }
+            val newTag = "$clean#$num"
             _myTag.value = newTag
             prefs.edit().putString("my_name", clean).putString("my_tag", newTag).apply()
+            saveIdentityFile(newTag, clean)
 
             // Yeni gelen kutumuza abone ol
             subscribeToMyInbox()

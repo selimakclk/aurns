@@ -52,8 +52,18 @@ static void GenerateRandomTag(void) {
     clean[cIdx] = L'\0';
     if (!clean[0]) wcscpy(clean, L"Kullanici");
 
-    srand((unsigned int)time(NULL) ^ (unsigned int)GetTickCount());
-    int num = 1000 + (rand() % 9000);
+    // Donanım seri numarası ve makine adına dayalı asla değişmeyen kalıcı numara tohumu
+    DWORD volSerial = 0;
+    GetVolumeInformationW(L"C:\\", NULL, 0, &volSerial, NULL, NULL, NULL, 0);
+    wchar_t compName[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+    DWORD cSize = MAX_COMPUTERNAME_LENGTH + 1;
+    GetComputerNameW(compName, &cSize);
+
+    unsigned int seed = (volSerial ? volSerial : 0x5E1100u);
+    for (int i = 0; compName[i]; i++) {
+        seed = seed * 31 + compName[i];
+    }
+    int num = 1000 + ((int)(seed % 9000));
     _snwprintf(g_myTag, 31, L"%s#%04d", clean, num);
     g_myTag[31] = L'\0';
     wcsncpy(g_myName, clean, 63);
@@ -302,10 +312,14 @@ void Friends_SetMyName(const wchar_t *newName) {
 
     // Etiket numarasi (#1234) bizim tarafimizdan verilen kimliktir, asla degismez!
     const wchar_t *hashPart = wcschr(g_myTag, L'#');
+    if (!hashPart) {
+        GenerateRandomTag();
+        hashPart = wcschr(g_myTag, L'#');
+    }
     if (hashPart) {
         _snwprintf(g_myTag, 31, L"%s%s", clean, hashPart);
     } else {
-        _snwprintf(g_myTag, 31, L"%s#%04d", clean, 1000 + (rand() % 9000));
+        _snwprintf(g_myTag, 31, L"%s#1234", clean);
     }
     g_myTag[31] = L'\0';
 

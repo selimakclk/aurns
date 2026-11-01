@@ -64,6 +64,7 @@
 #define IDT_IDLE_TRIM           1003
 #define IDC_HEADER_SEARCH       1010
 #define IDC_FRIEND_ADD_EDIT     1020
+#define IDC_MY_NAME_EDIT        1025
 
 #define IDM_CTX_PLAY            2001
 #define IDM_CTX_OPEN_FOLDER     2002
@@ -107,6 +108,7 @@ typedef enum {
     ZONE_FRIENDS_BACK,
     ZONE_FRIENDS_REFRESH,
     ZONE_COPY_TAG,
+    ZONE_EDIT_NAME,
     ZONE_FTAB0,
     ZONE_FTAB1,
     ZONE_FTAB2,
@@ -227,6 +229,9 @@ static SidebarView g_sidebarView = SIDEBAR_VIEW_MENU;
 static FriendsTab  g_friendsTab  = FRIENDS_TAB_LIST;
 static HWND        g_hFriendAddEdit = NULL;
 static WNDPROC     g_oldFriendAddEditProc = NULL;
+static HWND        g_hNameEdit = NULL;
+static WNDPROC     g_oldNameEditProc = NULL;
+static BOOL        g_isEditingMyName = FALSE;
 static wchar_t     g_friendAddMsg[128] = {0};
 static DWORD       g_copiedTagTick = 0;
 static DWORD       g_lastFriendsRefreshTick = 0;
@@ -260,7 +265,7 @@ static RECT rcSeekBar, rcSeekHit, rcVolBar, rcVolHit, rcSpeaker, rcDock;
 static RECT rcToastBox, rcToastAccept, rcToastReject;
 static RECT rcJamStage, rcJamLeave, rcJamMissingBtn;
 static RECT rcDlStage, rcDlCancel;
-static RECT rcFriendsBack, rcFriendsRefresh, rcCopyTag;
+static RECT rcFriendsBack, rcFriendsRefresh, rcCopyTag, rcEditName;
 static RECT rcFriendsTab0, rcFriendsTab1, rcFriendsTab2;
 static RECT rcFriendSendBtn;
 static RECT rcFriendActionBtns[MAX_FRIENDS];
@@ -904,6 +909,12 @@ static void ClampScrollTargets(HWND hWnd) {
 }
 
 static void UpdateSidebarEditPosition(void) {
+    if (g_sidebarAnim < 0.96f || g_isDraggingSidebar || g_sidebarView != SIDEBAR_VIEW_FRIENDS) {
+        if (g_hNameEdit && IsWindowVisible(g_hNameEdit)) {
+            ShowWindow(g_hNameEdit, SW_HIDE);
+            g_isEditingMyName = FALSE;
+        }
+    }
     if (!g_hFriendAddEdit) return;
     BOOL shouldShow = (g_sidebarAnim >= 0.96f && !g_isDraggingSidebar && g_sidebarView == SIDEBAR_VIEW_FRIENDS && g_friendsTab == FRIENDS_TAB_ADD);
     if (!shouldShow) {
@@ -1455,8 +1466,10 @@ static void ToggleSidebar(BOOL open) {
         g_sidebarAnim = open ? 1.0f : 0.0f;
         g_sidebarVel = 0.0f;
     }
-    if (!open && g_hFriendAddEdit) {
-        ShowWindow(g_hFriendAddEdit, SW_HIDE);
+    if (!open) {
+        if (g_hFriendAddEdit) ShowWindow(g_hFriendAddEdit, SW_HIDE);
+        if (g_hNameEdit) ShowWindow(g_hNameEdit, SW_HIDE);
+        g_isEditingMyName = FALSE;
     }
     if (open && g_sidebarView == SIDEBAR_VIEW_FRIENDS) {
         EnsureSocialNetworkStarted();
@@ -1609,6 +1622,47 @@ static void SubmitFriendRequest(HWND hWnd) {
     StartAnimLoop(hWnd);
     UpdateTimerSchedule(hWnd);
     InvalidateRect(hWnd, NULL, FALSE);
+}
+
+static void SubmitNewName(HWND hWnd) {
+    if (!g_hNameEdit) return;
+    wchar_t newName[64] = {0};
+    GetWindowTextW(g_hNameEdit, newName, 63);
+    StrTrimW(newName, L" \t\r\n");
+    if (newName[0]) {
+        Friends_SetMyName(newName);
+    }
+    g_isEditingMyName = FALSE;
+    ShowWindow(g_hNameEdit, SW_HIDE);
+    SetFocus(hWnd);
+    InvalidateRect(hWnd, NULL, FALSE);
+}
+
+static void CancelEditName(void) {
+    g_isEditingMyName = FALSE;
+    if (g_hNameEdit) ShowWindow(g_hNameEdit, SW_HIDE);
+    if (g_hWnd) {
+        SetFocus(g_hWnd);
+        InvalidateRect(g_hWnd, NULL, FALSE);
+    }
+}
+
+static LRESULT CALLBACK NameEditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_KEYDOWN) {
+        if (wParam == VK_RETURN) {
+            SubmitNewName(g_hWnd);
+            return 0;
+        } else if (wParam == VK_ESCAPE) {
+            CancelEditName();
+            return 0;
+        }
+    } else if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE)) {
+        return 0;
+    } else if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS) {
+        InvalidateRect(hWnd, NULL, FALSE);
+        if (g_hWnd) InvalidateRect(g_hWnd, NULL, FALSE);
+    }
+    return CallWindowProcW(g_oldNameEditProc, hWnd, msg, wParam, lParam);
 }
 
 // =============================================================================
@@ -2522,22 +2576,56 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
             DrawUiText(hdc, myInit, &rcMyInit, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
             BOOL recentlyCopied = (g_copiedTagTick != 0 && (GetTickCount() - g_copiedTagTick) < 2000);
-            rcCopyTag = (RECT){ rcMyCard.right - S(76), rcMyCard.top + S(12), rcMyCard.right - S(10), rcMyCard.bottom - S(12) };
-            DrawSmoothRoundRect(&rcCopyTag, S(8),
-                                recentlyCopied ? COLOR_ACCENT_ORANGE : ((g_hotZone == ZONE_COPY_TAG) ? COLOR_CARD_HOVER : RGB(24, 24, 24)),
-                                255, COLOR_BORDER, 160);
-            SelectObject(hdc, g_hFontMicro);
-            SetTextColor(hdc, recentlyCopied ? RGB(5, 5, 5) : COLOR_TEXT_WHITE);
-            DrawUiText(hdc, recentlyCopied ? L"✓ Kopyalandı" : L"Kopyala", &rcCopyTag, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            rcCopyTag = (RECT){ rcMyCard.right - S(64), rcMyCard.top + S(12), rcMyCard.right - S(8), rcMyCard.bottom - S(12) };
+            rcEditName = (RECT){ rcCopyTag.left - S(62), rcMyCard.top + S(12), rcCopyTag.left - S(6), rcMyCard.bottom - S(12) };
 
-            RECT rcMyLbl = { rcMyCard.left + S(50), rcMyCard.top + S(8),  rcCopyTag.left - S(6), rcMyCard.top + S(26) };
-            RECT rcMyTag = { rcMyCard.left + S(50), rcMyCard.top + S(25), rcCopyTag.left - S(6), rcMyCard.bottom - S(6) };
+            if (g_isEditingMyName) {
+                // Kaydet Butonu
+                DrawSmoothRoundRect(&rcEditName, S(8), COLOR_ACCENT_ORANGE, 255, COLOR_BORDER, 160);
+                SelectObject(hdc, g_hFontMicro);
+                SetTextColor(hdc, RGB(5, 5, 5));
+                DrawUiText(hdc, L"✓ Kaydet", &rcEditName, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                // İptal Butonu
+                DrawSmoothRoundRect(&rcCopyTag, S(8), (g_hotZone == ZONE_COPY_TAG) ? COLOR_CARD_HOVER : RGB(24, 24, 24), 255, COLOR_BORDER, 160);
+                SelectObject(hdc, g_hFontMicro);
+                SetTextColor(hdc, COLOR_TEXT_MUTED);
+                DrawUiText(hdc, L"İptal", &rcCopyTag, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                // Edit kontrolünü konumlandır
+                RECT rcNameEditBox = { rcMyCard.left + S(50), rcMyCard.top + S(22), rcEditName.left - S(8), rcMyCard.bottom - S(10) };
+                DrawSmoothRoundRect(&rcNameEditBox, S(6), COLOR_INPUT_BG, 255, COLOR_ACCENT_ORANGE, 220);
+                if (g_hNameEdit) {
+                    MoveWindow(g_hNameEdit, rcNameEditBox.left + S(4), rcNameEditBox.top + S(4),
+                               rcNameEditBox.right - rcNameEditBox.left - S(8), rcNameEditBox.bottom - rcNameEditBox.top - S(8), TRUE);
+                }
+            } else {
+                // Düzenle Butonu
+                DrawSmoothRoundRect(&rcEditName, S(8),
+                                    (g_hotZone == ZONE_EDIT_NAME) ? COLOR_CARD_HOVER : RGB(24, 24, 24),
+                                    255, COLOR_BORDER, 160);
+                SelectObject(hdc, g_hFontMicro);
+                SetTextColor(hdc, (g_hotZone == ZONE_EDIT_NAME) ? COLOR_ACCENT_PINK : COLOR_ACCENT_ORANGE);
+                DrawUiText(hdc, L"Düzenle", &rcEditName, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                // Kopyala Butonu
+                DrawSmoothRoundRect(&rcCopyTag, S(8),
+                                    recentlyCopied ? COLOR_ACCENT_ORANGE : ((g_hotZone == ZONE_COPY_TAG) ? COLOR_CARD_HOVER : RGB(24, 24, 24)),
+                                    255, COLOR_BORDER, 160);
+                SelectObject(hdc, g_hFontMicro);
+                SetTextColor(hdc, recentlyCopied ? RGB(5, 5, 5) : COLOR_TEXT_WHITE);
+                DrawUiText(hdc, recentlyCopied ? L"✓ Kopyalandı" : L"Kopyala", &rcCopyTag, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                RECT rcMyTag = { rcMyCard.left + S(50), rcMyCard.top + S(25), rcEditName.left - S(6), rcMyCard.bottom - S(6) };
+                SelectObject(hdc, g_hFontBold);
+                SetTextColor(hdc, COLOR_TEXT_WHITE);
+                DrawUiText(hdc, myTag, &rcMyTag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+
+            RECT rcMyLbl = { rcMyCard.left + S(50), rcMyCard.top + S(8),  rcEditName.left - S(6), rcMyCard.top + S(26) };
             SelectObject(hdc, g_hFontMicro);
             SetTextColor(hdc, COLOR_TEXT_DIM);
             DrawUiText(hdc, L"SENİN ETİKETİN", &rcMyLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(hdc, g_hFontBold);
-            SetTextColor(hdc, COLOR_TEXT_WHITE);
-            DrawUiText(hdc, myTag, &rcMyTag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
             RECT rcTabTray = { offX + S(12), headerH + S(106), offX + sbW - S(12), headerH + S(140) };
             DrawSmoothRoundRect(&rcTabTray, S(10), RGB(16, 16, 16), 255, COLOR_BORDER, 180);
@@ -2791,6 +2879,7 @@ static UiZone HitTestZones(POINT pt) {
             if (g_sidebarView == SIDEBAR_VIEW_FRIENDS) {
                 if (PtInRect(&rcFriendsBack, pt))    return ZONE_FRIENDS_BACK;
                 if (PtInRect(&rcFriendsRefresh, pt)) return ZONE_FRIENDS_REFRESH;
+                if (PtInRect(&rcEditName, pt))       return ZONE_EDIT_NAME;
                 if (PtInRect(&rcCopyTag, pt))        return ZONE_COPY_TAG;
                 if (PtInRect(&rcFriendsTab0, pt))    return ZONE_FTAB0;
                 if (PtInRect(&rcFriendsTab1, pt))    return ZONE_FTAB1;
@@ -2979,6 +3068,16 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             SendMessageW(g_hFriendAddEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Selim#8421");
             g_oldFriendAddEditProc = (WNDPROC)SetWindowLongPtrW(g_hFriendAddEdit, GWLP_WNDPROC, (LONG_PTR)FriendEditSubclassProc);
 
+            g_hNameEdit = CreateWindowExW(
+                0, L"EDIT", L"",
+                WS_CHILD | ES_AUTOHSCROLL,
+                0, 0, 0, 0,
+                hWnd, (HMENU)IDC_MY_NAME_EDIT, GetModuleHandle(NULL), NULL
+            );
+            SendMessageW(g_hNameEdit, WM_SETFONT, (WPARAM)g_hFontMain, TRUE);
+            SendMessageW(g_hNameEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Yeni adın...");
+            g_oldNameEditProc = (WNDPROC)SetWindowLongPtrW(g_hNameEdit, GWLP_WNDPROC, (LONG_PTR)NameEditSubclassProc);
+
             Player_Init(hWnd);
             Playlist_Init();
             Jam_Init();
@@ -3054,7 +3153,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
         case WM_CTLCOLOREDIT: {
             HWND hCtrl = (HWND)lParam;
-            if (hCtrl == g_hSearchEdit || hCtrl == g_hFriendAddEdit) {
+            if (hCtrl == g_hSearchEdit || hCtrl == g_hFriendAddEdit || hCtrl == g_hNameEdit) {
                 HDC hdcEdit = (HDC)wParam;
                 SetBkColor(hdcEdit, COLOR_INPUT_BG);
                 SetTextColor(hdcEdit, COLOR_TEXT_WHITE);
@@ -3103,6 +3202,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             InitDpiFonts(newDpi);
             if (g_hSearchEdit)    SendMessageW(g_hSearchEdit, WM_SETFONT, (WPARAM)g_hFontMain, TRUE);
             if (g_hFriendAddEdit) SendMessageW(g_hFriendAddEdit, WM_SETFONT, (WPARAM)g_hFontMain, TRUE);
+            if (g_hNameEdit)      SendMessageW(g_hNameEdit, WM_SETFONT, (WPARAM)g_hFontMain, TRUE);
             FreeBackbuffer();
             RECT *prc = (RECT*)lParam;
             SetWindowPos(hWnd, NULL, prc->left, prc->top, prc->right - prc->left, prc->bottom - prc->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -3936,12 +4036,33 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                         InvalidateRect(hWnd, NULL, FALSE);
                         return 0;
                     }
+                    if (hit == ZONE_EDIT_NAME) {
+                        if (g_isEditingMyName) {
+                            SubmitNewName(hWnd);
+                        } else {
+                            g_isEditingMyName = TRUE;
+                            if (g_hNameEdit) {
+                                wchar_t curName[64] = {0};
+                                Friends_GetMyName(curName, 64);
+                                SetWindowTextW(g_hNameEdit, curName);
+                                ShowWindow(g_hNameEdit, SW_SHOW);
+                                SetFocus(g_hNameEdit);
+                                SendMessageW(g_hNameEdit, EM_SETSEL, 0, -1);
+                            }
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                        return 0;
+                    }
                     if (hit == ZONE_COPY_TAG) {
-                        wchar_t myTag[32] = {0};
-                        Friends_GetMyTag(myTag, 32);
-                        CopyToClipboard(hWnd, myTag);
-                        g_copiedTagTick = GetTickCount();
-                        InvalidateRect(hWnd, NULL, FALSE);
+                        if (g_isEditingMyName) {
+                            CancelEditName();
+                        } else {
+                            wchar_t myTag[32] = {0};
+                            Friends_GetMyTag(myTag, 32);
+                            CopyToClipboard(hWnd, myTag);
+                            g_copiedTagTick = GetTickCount();
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
                         return 0;
                     }
                     if (hit == ZONE_FTAB0) {
