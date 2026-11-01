@@ -240,16 +240,25 @@ class FriendsManager(private val context: Context) {
     private fun startNetworkLoop() {
         isRunning = true
         scope.launch {
-            var brokerIndex = 0
             while (isRunning) {
-                val brokerHost = BROKERS[brokerIndex % BROKERS.size]
+                var s: Socket? = null
                 try {
-                    val s = Socket()
-                    s.connect(InetSocketAddress(brokerHost, 1883), 5000)
+                    // Windows ile birebir ayni birincil broker (broker.hivemq.com)
+                    val primaryHost = "broker.hivemq.com"
+                    val fallbackHost = "broker.emqx.io"
+                    s = Socket()
+                    try {
+                        s.connect(InetSocketAddress(primaryHost, 1883), 4000)
+                    } catch (_: Exception) {
+                        try { s.close() } catch (_: Exception) {}
+                        s = Socket()
+                        s.connect(InetSocketAddress(fallbackHost, 1883), 5000)
+                    }
                     s.soTimeout = 45000
+                    s.tcpNoDelay = true
                     socket = s
                     outputStream = s.getOutputStream()
-                    val inputStream = s.getInputStream()
+                    val inStream = s.getInputStream()
 
                     val clientId = "aurns_and_${System.currentTimeMillis() % 100000}"
                     sendMqttConnect(outputStream, clientId)
@@ -260,18 +269,41 @@ class FriendsManager(private val context: Context) {
                     // Arkadaşların canlı durumunu iste
                     requestAllStatuses()
 
-                    val buffer = ByteArray(4096)
+                    val inData = java.io.DataInputStream(inStream)
                     while (isRunning && socket?.isConnected == true) {
-                        val read = inputStream.read(buffer)
-                        if (read <= 0) break
-                        handleIncomingMqttPacket(buffer, read)
+                        val header = inData.readUnsignedByte()
+                        var multiplier = 1
+                        var remLen = 0
+                        var digit: Int
+                        do {
+                            digit = inData.readUnsignedByte()
+                            remLen += (digit and 0x7F) * multiplier
+                            multiplier *= 128
+                        } while ((digit and 0x80) != 0)
+
+                        val packetBody = ByteArray(remLen)
+                        inData.readFully(packetBody)
+
+                        val pktType = header and 0xF0
+                        if (pktType == 0x30) { // PUBLISH paketi
+                            if (remLen >= 2) {
+                                val topLen = ((packetBody[0].toInt() and 0xFF) shl 8) or (packetBody[1].toInt() and 0xFF)
+                                if (2 + topLen <= remLen) {
+                                    val topic = String(packetBody, 2, topLen, Charsets.UTF_8)
+                                    val payloadLen = remLen - 2 - topLen
+                                    val payload = if (payloadLen > 0) String(packetBody, 2 + topLen, payloadLen, Charsets.UTF_8) else ""
+                                    handleNetworkMessage(topic, payload)
+                                }
+                            }
+                        }
                     }
                 } catch (e: Exception) {
-                    brokerIndex++
+                    // Ağ kopması veya zaman aşımı durumunda yeniden bağlan
                 } finally {
                     _isConnected.value = false
+                    try { s?.close() } catch (ignored: Exception) {}
                     try { socket?.close() } catch (ignored: Exception) {}
-                    delay(2000)
+                    delay(1500)
                 }
             }
         }
@@ -300,34 +332,6 @@ class FriendsManager(private val context: Context) {
         if (myKey.isNotBlank()) {
             sendMqttSubscribe(outputStream, "seloplayer/u/$myKey")
         }
-    }
-
-    private fun handleIncomingMqttPacket(buf: ByteArray, len: Int) {
-        val pktType = buf[0].toInt() and 0xF0
-        if (pktType != 0x30) return // PUBLISH değilse atla
-
-        var idx = 1
-        var multiplier = 1
-        var remLen = 0
-        while (idx < len) {
-            val digit = buf[idx].toInt() and 0xFF
-            remLen += (digit and 0x7F) * multiplier
-            multiplier *= 128
-            idx++
-            if ((digit and 0x80) == 0) break
-        }
-
-        if (idx + 2 > len) return
-        val topLen = ((buf[idx].toInt() and 0xFF) shl 8) or (buf[idx + 1].toInt() and 0xFF)
-        idx += 2
-        if (idx + topLen > len) return
-
-        val topic = String(buf, idx, topLen, Charsets.UTF_8)
-        idx += topLen
-        val payloadLen = len - idx
-        val payload = if (payloadLen > 0) String(buf, idx, payloadLen, Charsets.UTF_8) else ""
-
-        handleNetworkMessage(topic, payload)
     }
 
     private fun handleNetworkMessage(topic: String, payload: String) {
@@ -394,6 +398,11 @@ class FriendsManager(private val context: Context) {
                         // Varlik / cevrimici sorgusu yapan coroutine'i tetikle
                         val key = tagToTopicKey(fromTag)
                         pendingUserQueries[key]?.complete(true)
+                        for ((k, def) in pendingUserQueries) {
+                            if (k.equals(key, ignoreCase = true)) {
+                                def.complete(true)
+                            }
+                        }
                     }
                 }
 
@@ -518,15 +527,22 @@ class FriendsManager(private val context: Context) {
     // ==================== KULLANICI ARAMA & ARKADAŞ EKLEME ====================
 
     suspend fun checkUserAndSendRequest(targetTag: String): Result<String> {
-        val clean = targetTag.trim()
+        val clean = targetTag.trim().replace("@", "")
         if (clean.isBlank() || !clean.contains("#")) {
-            return Result.failure(Exception("Etiket '#' içermelidir (Örn: Selim#1234)"))
+            return Result.failure(Exception("Etiket '#' ve numara içermelidir (Örn: akcel#4770)"))
         }
         if (clean.equals(_myTag.value, ignoreCase = true)) {
             return Result.failure(Exception("Kendinize arkadaşlık isteği gönderemezsiniz!"))
         }
         if (_friends.value.any { it.tag.equals(clean, ignoreCase = true) }) {
             return Result.failure(Exception("Bu kullanıcı zaten arkadaş listenizde!"))
+        }
+
+        // Ağın bağlı olduğundan emin ol (bağlanıyorsa 2 saniyeye kadar bekle)
+        var waitConnectMs = 0
+        while (!_isConnected.value && waitConnectMs < 2000) {
+            delay(100)
+            waitConnectMs += 100
         }
 
         val targetKey = tagToTopicKey(clean)
@@ -536,20 +552,28 @@ class FriendsManager(private val context: Context) {
         pendingUserQueries[targetKey] = queryDeferred
 
         try {
-            // Kullaniciyi ag uzerinden canli sorgulamak icin PING gonder
+            // Kullanıcıyı ağ üzerinden canlı sorgulamak için PING gönder
             val pingPayload = "PING|${_myTag.value}|${_myName.value}"
             sendMqttPublish(outputStream, topic, pingPayload)
 
-            // 2.2 saniye boyunca kullanicidan PONG yaniti bekle
-            val isFound = withTimeoutOrNull(2200) {
+            // 3.5 saniye boyunca kullanıcıdan PONG yanıtı bekle
+            var isFound = withTimeoutOrNull(3500) {
                 queryDeferred.await()
             } ?: false
+
+            if (!isFound) {
+                // Hızlı bir ikinci ping ile tekrar kontrol et (ağ dalgalanmalarına karşı garanti)
+                sendMqttPublish(outputStream, topic, pingPayload)
+                isFound = withTimeoutOrNull(2000) {
+                    queryDeferred.await()
+                } ?: false
+            }
 
             if (!isFound) {
                 return Result.failure(Exception("Böyle bir kullanıcı yok veya şu an çevrimdışı!"))
             }
 
-            // Kullanici bulundu, istek paketini ilet
+            // Kullanıcı bulundu, istek paketini ilet
             val reqPayload = "REQ|${_myTag.value}|${_myName.value}"
             sendMqttPublish(outputStream, topic, reqPayload)
             return Result.success("İstek başarıyla gönderildi!")

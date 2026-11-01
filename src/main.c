@@ -3095,9 +3095,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
         case WM_APP_POST_INIT: {
             Friends_Init();
-            if (Friends_GetFriendCount() > 0) {
-                EnsureSocialNetworkStarted();
-            }
+            EnsureSocialNetworkStarted();
 
             if (g_cfg.lastFolder[0] && GetFileAttributesW(g_cfg.lastFolder) != INVALID_FILE_ATTRIBUTES) {
                 Playlist_ScanFolder(g_cfg.lastFolder);
