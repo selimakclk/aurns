@@ -127,7 +127,7 @@ BOOL Search_RunYtDlpDownload(const wchar_t *targetSpec,
 
     wchar_t cmdLine[2048];
     _snwprintf(cmdLine, 2047,
-               L"yt-dlp.exe --progress --newline --no-warnings -f \"ba[ext=m4a]/ba\" --write-thumbnail --no-playlist -o \"%s\\%%(title)s [%%(id)s].%%(ext)s\" \"%s\"",
+               L"yt-dlp.exe --progress --newline --no-warnings --concurrent-fragments 4 --buffer-size 16M -f \"ba[ext=m4a]/ba\" --no-playlist -o \"%s\\%%(title)s [%%(id)s].%%(ext)s\" \"%s\"",
                destFolder, targetSpec);
     cmdLine[2047] = L'\0';
 
