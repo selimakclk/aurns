@@ -1,30 +1,36 @@
-# 📱 ΛURNS for Android (v1.1.0)
-### Ultra Hafif, Apple Akıcı Yay Fiziği & Dahili YouTube İndiricili Yerel Müzik Çalar
+# 📱 ΛURNS Android (`v1.4.0`)
+### %100 İkiz Platform Deneyimi • Sınırsız Kişilik Canlı Jam • 4 Kanallı Hızlı İndirici
 
-Bu proje, Windows için geliştirilen **ΛURNS** masaüstü oynatıcısının resmi Android sürümüdür. 
-
----
-
-## ⚡ Özellikler
-
-1. **YouTube Doğrudan İndirici (MYT Hızı & Sıfır Sunucu Yükü):**
-   * YouTube'un mobil iç API'si (Innertube) üzerinden 0.1 saniyede doğrudan ses akışı (`160 kbps M4A`) linkini çözer.
-   * Dosyayı doğrudan Android sisteminin `DownloadManager` servisine teslim eder; telefon kapalıyken bile arka planda canlı `%` ile indirir.
-2. **Obsidian & Sunset-Neon Arayüz:**
-   * `#050505` siyah zemin, `#FF925C` neon turuncu ve `#F044B8` siber pembe vurgular.
-   * Çalan parçada parlayan dinamik nefes alan neon durum noktası.
-   * Yüzen cam oynatıcı kartı (Floating Glass Dock).
-3. **Android 14+ Kilit Ekranı ve Arka Planda Çalma:**
-   * Google Media3 / ExoPlayer motoru ile ekran kapalıyken kesintisiz çalma.
-   * Kulaklık tuşları, Bluetooth araç kontrolleri ve dalgalı ilerleme çubuğuna sahip modern kilit ekranı kartı.
-4. **P2P Canlı Jam Senkronizasyonu:**
-   * Bilgisayardaki Windows ΛURNS ile aynı MQTT broker protokolü üzerinden konuşarak telefon ve PC arasında aynı anda canlı müzik dinleme.
+Bu modül, **ΛURNS (`v1.4.0`)** müzik oynatıcısının resmi Android uygulamasıdır ve masaüstü Windows (`src/`) sürümüyle **piksel piksel %100 aynı arayüz ve özellik eşitliğine** sahiptir.
 
 ---
 
-## 🛠️ Derleme ve Çalıştırma
+## ⚡ Öne Çıkan Özellikler (`v1.4.0`)
 
-1. **Android Studio** ile `android/` klasörünü açın.
-2. Gradle senkronizasyonunun tamamlanmasını bekleyin.
-3. `Run 'app'` (Shift + F10) tuşuna basarak cihazınızda veya emülatörde çalıştırın.
-4. APK çıktısı almak için: `Build > Build Bundle(s) / APK(s) > Build APK(s)`.
+1. **%100 Masaüstü İkiz Arayüzü (Obsidian & Sunset-Neon):**
+   * `#050505` Obsidian zemin, `#FF925C` / `#FF6E50` / `#F044B8` 3 renkli Sunset-Neon ilerleme çubuğu.
+   * Her zaman görünür yüzen alt oynatıcı (`FloatingPlayerDock`), `# | PARÇA VE SANATÇI | X PARÇA` sütun başlığı, 2 satırlı saf Şarkı / Sanatçı ayrımı, Aura durum noktaları ve `⋮` satır menüsü.
+2. **Sınırsız Kişilik Canlı Jam Odaları & Milisaniye Yakalama (`Seek-to-Live`):**
+   * Bilgisayar (`Aurns.exe`) ve Android (`Aurns.apk`) kullanıcılarıyla aynı odada sınırsız katılımcıyla canlı müzik dinleme.
+   * Odada çalan parça telefonda yoksa arka planda otomatik indirilip doğrudan canlı milisaniyeye (`Seek-to-Live`) atlayarak sıfır kaymayla başlar.
+3. **Kişisel Kullanıcı Adı & Sabit `#Etiket` Kimliği:**
+   * Yan menüdeki **SENİN ETİKETİN** kartından satır içi isim değiştirme ve cihaza bağlı sabit `#numara` kimliği.
+4. **4 Kanallı Yüksek Hızlı YouTube Arama & İndirme:**
+   * YouTube Innertube API üzerinden doğrudan yüksek kaliteli ses akışını (`M4A`) çözer ve 4 paralel kanal (`HTTP Range`) ile saniyeler içinde indirir.
+   * Türkçe karakter duyarsız (`ı/i, ş/s, ğ/g, ü/u, ö/o, ç/c`) arşiv içi anlık arama ve paylaşılan `.m3u8` / `.aurns` liste eşitleme.
+5. **Uygulama İçi Canlı Güncelleyici & Arka Planda Çalma:**
+   * Açılışta otomatik sürüm kontrolü ve uygulama içinden canlı `%` çubuğuyla tek tıkla APK güncelleme (`FileProvider`).
+   * AndroidX Media3 / ExoPlayer ile ekran kapalıyken kesintisiz çalma, bildirim kartı ve kilit ekranı kontrolleri.
+
+---
+
+## 🛠️ Derleme
+
+JDK 21 ve Android SDK (API 34) ile:
+
+```bash
+cd android
+./gradlew assembleRelease
+```
+
+İmzalı APK çıktısı `android/app/build/outputs/apk/release/app-release.apk` konumunda üretilir.

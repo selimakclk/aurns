@@ -99,8 +99,7 @@ import kotlin.math.abs
 
 private const val APP_VERSION = "1.4.0"
 private const val VERSION_CHECK_URL = "https://raw.githubusercontent.com/selimakclk/aurns/main/version.txt"
-private const val APK_RAW_URL = "https://raw.githubusercontent.com/selimakclk/aurns/main/Aurns.apk"
-private const val APK_RELEASE_URL = "https://github.com/selimakclk/aurns/releases/download/v1.1.0/Aurns.apk"
+private const val APK_RELEASE_LATEST_URL = "https://github.com/selimakclk/aurns/releases/latest/download/Aurns.apk"
 
 class MainActivity : ComponentActivity() {
 
@@ -735,10 +734,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startInAppSelfUpdate(versionStr: String) {
+        val cleanVer = versionStr.trim().removePrefix("v").removePrefix("V")
+        val taggedReleaseUrl = "https://github.com/selimakclk/aurns/releases/download/v$cleanVer/Aurns.apk"
         downloadManager.startApkUpdateDownload(
-            primaryUrl = APK_RAW_URL,
-            fallbackUrl = APK_RELEASE_URL,
-            versionStr = versionStr,
+            primaryUrl = taggedReleaseUrl,
+            fallbackUrl = APK_RELEASE_LATEST_URL,
+            versionStr = cleanVer,
             onApkReady = { apkFile ->
                 installDownloadedApk(apkFile, retryPermission = true)
             }

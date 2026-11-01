@@ -21,11 +21,20 @@ android {
         }
     }
 
+    signingConfigs {
+        create("aurnsRelease") {
+            storeFile = file("aurns-release.jks")
+            storePassword = "aurns1234"
+            keyAlias = "aurns"
+            keyPassword = "aurns1234"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("aurnsRelease")
         }
     }
 

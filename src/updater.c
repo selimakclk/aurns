@@ -48,7 +48,7 @@ static HINTERNET OpenHttpRequest(const wchar_t *url, HINTERNET *pSession, HINTER
 
     if (!WinHttpCrackUrl(url, 0, 0, &uc)) return NULL;
 
-    HINTERNET hSession = WinHttpOpen(L"Aurns/1.1", WINHTTP_ACCESS_TYPE_NO_PROXY,
+    HINTERNET hSession = WinHttpOpen(L"Aurns/" APP_VERSION_STR, WINHTTP_ACCESS_TYPE_NO_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return NULL;
 

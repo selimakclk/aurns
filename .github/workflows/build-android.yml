@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build & Release Aurns (v1.4.0+)
 
 on:
   push:
@@ -17,11 +17,17 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Read Version from version.txt
+        run: |
+          RAW_VER=$(head -n 1 version.txt | sed 's/^\xEF\xBB\xBF//' | tr -d '\r\n ')
+          echo "RAW_VER=${RAW_VER}" >> "$GITHUB_ENV"
+          echo "APP_TAG=v${RAW_VER#v}" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -33,25 +39,35 @@ jobs:
       - name: Build Android Release APK
         working-directory: ./android
         run: |
-          gradle wrapper
+          gradle wrapper --gradle-version 8.7
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
 
       - name: Prepare APK File
         run: |
-          find android/app/build/outputs/apk/ -name "*.apk" -type f
-          cp android/app/build/outputs/apk/release/app-release.apk Aurns.apk || cp $(find android/app/build/outputs/apk/ -name "*.apk" | head -n 1) Aurns.apk
-          ls -lh Aurns.apk
+          cp android/app/build/outputs/apk/release/app-release.apk Aurns.apk
+          ls -lh Aurns.apk Aurns.exe
 
       - name: Upload APK as Workflow Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Aurns-Android-v1.1.0
+          name: Aurns-Android-${{ env.APP_TAG }}
           path: Aurns.apk
           retention-days: 30
 
-      - name: Attach APK to GitHub Release v1.1.0
+      - name: Sync GitHub Release (${{ env.APP_TAG }})
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload v1.1.0 Aurns.apk --clobber || echo "Release upload skipped or failed"
+          if gh release view "${{ env.APP_TAG }}" >/dev/null 2>&1; then
+            gh release upload "${{ env.APP_TAG }}" Aurns.exe Aurns.apk --clobber
+          else
+            NOTES=$(tail -n +3 version.txt | tr -d '\r')
+            if [ -z "$NOTES" ]; then
+              NOTES="ΛURNS ${{ env.APP_TAG }} Bilgisayar (Windows) ve Telefon (Android) sürümü."
+            fi
+            gh release create "${{ env.APP_TAG }}" Aurns.exe Aurns.apk \
+              --title "${{ env.APP_TAG }} — ΛURNS (Bilgisayar & Android)" \
+              --notes "$NOTES" \
+              --latest
+          fi
