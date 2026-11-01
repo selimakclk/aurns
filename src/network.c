@@ -8,7 +8,7 @@
 #define PRIMARY_BROKER   "broker.hivemq.com"
 #define FALLBACK_BROKER  "broker.emqx.io"
 #define BROKER_PORT      "1883"
-#define MAX_TOPICS       16
+#define MAX_TOPICS       32
 
 static HWND g_hNotifyWnd = NULL;
 static char g_clientTag[64] = {0};
@@ -75,6 +75,23 @@ static BOOL RawSendSubscribe(SOCKET s, const char *topic) {
     memcpy(&pkt[idx], topic, topLen);
     idx += topLen;
     pkt[idx++] = 0x00; // QoS 0
+
+    return (SendAll(s, (char*)pkt, idx) > 0);
+}
+
+static BOOL RawSendUnsubscribe(SOCKET s, const char *topic) {
+    int topLen = (int)strlen(topic);
+    if (topLen <= 0 || topLen > 200) return FALSE;
+    unsigned char pkt[256];
+    int idx = 0;
+    pkt[idx++] = 0xA2; // UNSUBSCRIBE (MQTT 3.1.1)
+    int remLen = 2 + 2 + topLen;
+    pkt[idx++] = (unsigned char)remLen;
+    pkt[idx++] = 0x00; pkt[idx++] = 0x02; // Packet ID
+    pkt[idx++] = (unsigned char)(topLen >> 8);
+    pkt[idx++] = (unsigned char)(topLen & 0xFF);
+    memcpy(&pkt[idx], topic, topLen);
+    idx += topLen;
 
     return (SendAll(s, (char*)pkt, idx) > 0);
 }
@@ -250,9 +267,9 @@ static DWORD WINAPI NetworkThreadProc(LPVOID lpParam) {
                                     topic[tLen] = '\0';
 
                                     int pLen = remLen - 2 - tLen;
-                                    char payload[512] = {0};
+                                    char payload[1024] = {0};
                                     if (pLen > 0) {
-                                        if (pLen > 511) pLen = 511;
+                                        if (pLen > 1023) pLen = 1023;
                                         memcpy(payload, &buf[2 + tLen], pLen);
                                         payload[pLen] = '\0';
                                     }
@@ -353,6 +370,10 @@ static void SanitizeTopic(const char *in, char *out, int maxLen) {
     out[i] = '\0';
 }
 
+BOOL Network_IsConnected(void) {
+    return g_connected;
+}
+
 BOOL Network_Subscribe(const char *topic) {
     if (!g_running || !topic || !topic[0]) return FALSE;
 
@@ -375,6 +396,32 @@ BOOL Network_Subscribe(const char *topic) {
     BOOL ok = FALSE;
     if (g_connected && g_socket != INVALID_SOCKET) {
         ok = RawSendSubscribe(g_socket, safeTopic);
+    }
+    LeaveCriticalSection(&g_cs);
+
+    return ok;
+}
+
+BOOL Network_Unsubscribe(const char *topic) {
+    if (!g_running || !topic || !topic[0]) return FALSE;
+
+    char safeTopic[128] = {0};
+    SanitizeTopic(topic, safeTopic, sizeof(safeTopic));
+
+    EnterCriticalSection(&g_cs);
+    for (int i = 0; i < g_topicCount; i++) {
+        if (strcmp(g_topics[i], safeTopic) == 0) {
+            for (int j = i; j < g_topicCount - 1; j++) {
+                memcpy(g_topics[j], g_topics[j + 1], sizeof(g_topics[0]));
+            }
+            g_topicCount--;
+            break;
+        }
+    }
+
+    BOOL ok = FALSE;
+    if (g_connected && g_socket != INVALID_SOCKET) {
+        ok = RawSendUnsubscribe(g_socket, safeTopic);
     }
     LeaveCriticalSection(&g_cs);
 

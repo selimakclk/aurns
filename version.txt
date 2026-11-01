@@ -1,6 +1,6 @@
-1.2.0
+1.3.0
 https://raw.githubusercontent.com/selimakclk/aurns/main/Aurns.exe
-- Çapraz Platform Jam (Telefon <-> Telefon ve Telefon <-> Bilgisayar): Eşzamanlı müzik dinleme, duraklatma, devam etme ve sarma (seek) senkronizasyonu.
-- Aktif Kullanıcı Doğrulama: Arkadaş eklerken kullanıcının çevrimiçi varlığı anlık PING/PONG ile doğrulanır (Bulunamadıysa 'Böyle bir kullanıcı yok veya çevrimdışı!', bulunduysa 'İstek gönderildi!').
-- 4 Kanallı Paralel Hızlı İndirme (MYT Hızı): Şarkılar eşzamanlı parçalarla 4 kat daha hızlı indirilir.
-- Kişiselleştirilebilir Kullanıcı Adı & Sabit Değişmez Etiket Kimliği.
+- Sınırsız Kişilik Canlı Jam Odası: 2 kişi sınırı kaldırıldı; telefonlar ve bilgisayarlar aynı anda tek odada buluşabilir ve aktif odaya yeni arkadaşlar davet edilebilir.
+- Eksik Şarkı Canlı Yakalama (Milisaniye Senkronizasyonu): Jam'de sende olmayan şarkı arka planda otomatik indirilir ve 00:00 yerine tam canlı çalınan saniyeden başlar.
+- Akıllı Çalma Listesi Paylaşımı (.m3u8 / .aurns): Paylaşılan listedeki eksik parçalar otomatik indirilir.
+- %100 Bilgisayar ve Telefon Özellik Eşitliği: 3 aşamalı tekrar modu, klasör seçimi, parça sağ tık / uzun basma menüsü ve canlı güncelleme denetimi.

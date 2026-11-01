@@ -7,20 +7,26 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,6 +35,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -48,6 +55,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
@@ -67,8 +76,22 @@ import com.aurns.player.service.PlaybackService
 import com.aurns.player.ui.theme.*
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.File
+import java.util.concurrent.TimeUnit
+import kotlin.math.abs
+
+private const val APP_VERSION = "1.3.0"
+private const val VERSION_CHECK_URL = "https://raw.githubusercontent.com/selimakclk/aurns/main/version.txt"
+private const val APK_RELEASE_URL = "https://github.com/selimakclk/aurns/releases/download/v1.1.0/Aurns.apk"
 
 class MainActivity : ComponentActivity() {
 
@@ -76,126 +99,119 @@ class MainActivity : ComponentActivity() {
     private lateinit var friendsManager: FriendsManager
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
+    private var pendingControllerAction: (() -> Unit)? = null
 
-    // Parça Listesi ve Durumları
+    private val playerPrefs by lazy { getSharedPreferences("aurns_player_prefs", Context.MODE_PRIVATE) }
+
+    // Parça Listesi ve Kalıcı Oynatıcı Durumları (Windows src/main.c ile %100 birebir)
     private val tracks = mutableStateListOf<Track>()
-    private var currentTrackIndex by mutableStateOf(-1)
+    private val hiddenTrackIds = HashSet<Long>()
+    private var currentTrackIndex by mutableIntStateOf(-1)
     private var isPlaying by mutableStateOf(false)
     private var isShuffle by mutableStateOf(false)
-    private var isRepeat by mutableStateOf(false)
+    // 0 = Kapalı, 1 = Tümünü Tekrarla, 2 = Tek Parça Tekrarla
+    private var repeatMode by mutableIntStateOf(0)
+    private var customFolderUri by mutableStateOf<String?>(null)
 
-    // Sadece Slider'ın bağımsız güncellenmesi için akışlar (Ana ekranı ve listeyi asla tetiklemez)
+    // Sadece ilerleme çubuğunu izole güncelleyen akışlar (60 FPS, sıfır liste recomposition)
     private val currentPositionFlow = MutableStateFlow(0)
     private val durationFlow = MutableStateFlow(0)
 
-    // Jam Canlı Senkronizasyon ve Eksik Parça Otomatik Atlatma (Seek-to-Live)
-    private var jamAutoDlPendingTitle: String? = null
-    private var jamAutoDlRemoteStartPos = 0
-    private var jamAutoDlRemoteStartTime = 0L
+    // Canlı Jam Eksik Parça Otomatik İndirme & Canlı Milisaniye Yakalama (Seek-to-Live)
+    private var jamAutoDlJob: Job? = null
+    private var jamWantTitle: String = ""
+    private var jamWantYtId: String = ""
+    private var jamWantBaseMs: Long = 0L
+    private var jamWantRecvTimeMs: Long = 0L
+    private var jamWantPlaying: Boolean = true
+
+    // Paylaşılan Akıllı Liste (.m3u8 / .m3u / .aurns) Arka Plan Kuyruğu
+    private var playlistImportJob: Job? = null
+    private var pendingDeleteTrackId: Long = -1L
+
+    private val progressHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val progressRunnable = object : Runnable {
+        override fun run() {
+            mediaController?.let { p ->
+                currentPositionFlow.value = (p.currentPosition.coerceAtLeast(0L) / 1000L).toInt()
+                durationFlow.value = if (p.duration > 0) (p.duration / 1000L).toInt() else 0
+            }
+            progressHandler.postDelayed(this, 500L)
+        }
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         if (permissions.values.any { it }) {
-            loadLocalTracks()
+            refreshLocalTracksAsync()
         }
+    }
+
+    private val folderPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+            val uriStr = treeUri.toString()
+            customFolderUri = uriStr
+            playerPrefs.edit().putString("custom_folder_uri", uriStr).apply()
+            hiddenTrackIds.clear()
+            refreshLocalTracksAsync(toastOnComplete = true)
+        }
+    }
+
+    private val importPlaylistLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            importSmartPlaylist(uri)
+        }
+    }
+
+    private val deleteRequestLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { res ->
+        if (res.resultCode == RESULT_OK && pendingDeleteTrackId != -1L) {
+            removeTrackEntryById(pendingDeleteTrackId)
+            Toast.makeText(this, "✓ Parça cihazdan silindi", Toast.LENGTH_SHORT).show()
+        }
+        pendingDeleteTrackId = -1L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        isShuffle = playerPrefs.getBoolean("is_shuffle", false)
+        repeatMode = playerPrefs.getInt("repeat_mode", 0).coerceIn(0, 2)
+        customFolderUri = playerPrefs.getString("custom_folder_uri", null)
+
         downloadManager = AudioDownloadManager(this)
         friendsManager = FriendsManager(this)
 
         downloadManager.onDownloadFinishedListener = {
-            val updatedTracks = MusicScanner.scanLocalTracks(this)
-            tracks.clear()
-            tracks.addAll(updatedTracks)
-
-            val pendingTitle = jamAutoDlPendingTitle
-            if (pendingTitle != null && friendsManager.jamState.value.isActive) {
-                val newIdx = updatedTracks.indexOfFirst {
-                    it.title.contains(pendingTitle, ignoreCase = true) || pendingTitle.contains(it.title, ignoreCase = true)
-                }
-                if (newIdx != -1) {
-                    val elapsedSec = ((System.currentTimeMillis() - jamAutoDlRemoteStartTime) / 1000).toInt()
-                    val targetPosSec = jamAutoDlRemoteStartPos + elapsedSec
-
-                    playTrack(newIdx, isRemoteSync = true)
-                    if (targetPosSec > 0) {
-                        seekTo(targetPosSec, isRemoteSync = true)
-                    }
-                    friendsManager.requestJamPartnerState()
-                    Toast.makeText(this, "✓ Ortak şarkı indirildi • Canlı saniyeye eşitlendi!", Toast.LENGTH_SHORT).show()
-                }
-                jamAutoDlPendingTitle = null
-            } else {
-                Toast.makeText(this, "Şarkı kütüphaneye eklendi!", Toast.LENGTH_SHORT).show()
-            }
+            refreshLocalTracksAsync()
+            Toast.makeText(this, "✓ Parça kütüphaneye eklendi!", Toast.LENGTH_SHORT).show()
         }
 
-        // Arkadaş Jam üzerinden şarkı senkronize ettiğinde (Phone <-> Phone & Phone <-> PC)
-        friendsManager.onRemoteJamPlayRequest = { title, posSec ->
-            runOnUiThread {
-                val idx = tracks.indexOfFirst {
-                    it.title.contains(title, ignoreCase = true) || title.contains(it.title, ignoreCase = true)
-                }
-                if (idx != -1) {
-                    playTrack(idx, isRemoteSync = true)
-                    if (posSec > 0) seekTo(posSec, isRemoteSync = true)
-                    Toast.makeText(this, "Jam: '$title' senkronize edildi", Toast.LENGTH_SHORT).show()
-                } else {
-                    // Şarkı sende yok! Otomatik olarak arka planda indir ve canlı saniyeye atla
-                    Toast.makeText(this, "⚡ '$title' sende yok • Otomatik indiriliyor...", Toast.LENGTH_SHORT).show()
-                    jamAutoDlPendingTitle = title
-                    jamAutoDlRemoteStartPos = posSec
-                    jamAutoDlRemoteStartTime = System.currentTimeMillis()
-
-                    lifecycleScope.launch(Dispatchers.IO) {
-                        try {
-                            val results = InnertubeResolver.search(title)
-                            val best = results.firstOrNull()
-                            if (best != null) {
-                                downloadManager.startDownload(best.videoId, best.title, best.artist)
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                    }
-                }
-            }
+        downloadManager.onCancelPlaylistQueue = {
+            playlistImportJob?.cancel()
+            playlistImportJob = null
+            cancelJamAutoDownload()
         }
 
-        // Arkadaş Jam üzerinden duraklattığında, başlattığında veya sardığında
-        friendsManager.onRemoteJamPosRequest = { playFlag, posSec ->
-            runOnUiThread {
-                if (posSec >= 0) {
-                    mediaController?.seekTo(posSec * 1000L)
-                }
-                if (playFlag == 0) {
-                    mediaController?.pause()
-                    isPlaying = false
-                } else if (playFlag == 1) {
-                    mediaController?.play()
-                    isPlaying = true
-                }
-            }
-        }
-
-        // Arkadaş bizim anlık çalma konumumuzu sorduğunda (JAM_ASK)
-        friendsManager.onRemoteJamAskRequest = {
-            runOnUiThread {
-                mediaController?.let { p ->
-                    val curPosSec = (p.currentPosition / 1000).toInt()
-                    val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
-                    if (title.isNotEmpty()) {
-                        friendsManager.broadcastJamState(title, p.isPlaying, curPosSec)
-                    }
-                }
-            }
-        }
-
+        setupJamCallbacks()
         checkAndRequestPermissions()
         initMediaController()
+
+        if (savedInstanceState == null) {
+            handleIncomingPlaylistIntent(intent)
+        }
 
         setContent {
             AurnsTheme {
@@ -204,7 +220,8 @@ class MainActivity : ComponentActivity() {
                     currentTrackIndex = currentTrackIndex,
                     isPlaying = isPlaying,
                     isShuffle = isShuffle,
-                    isRepeat = isRepeat,
+                    repeatMode = repeatMode,
+                    hasCustomFolder = !customFolderUri.isNullOrBlank(),
                     currentPositionFlow = currentPositionFlow,
                     durationFlow = durationFlow,
                     downloadManager = downloadManager,
@@ -212,17 +229,323 @@ class MainActivity : ComponentActivity() {
                     onPlayTrack = { index -> playTrack(index) },
                     onTogglePlay = { togglePlayPause() },
                     onSeek = { sec -> seekTo(sec) },
-                    onNext = { playNext() },
+                    onNext = { playNext(fromAutoEnd = false) },
                     onPrev = { playPrev() },
-                    onToggleShuffle = { isShuffle = !isShuffle },
-                    onToggleRepeat = { isRepeat = !isRepeat },
-                    onRefreshTracks = { loadLocalTracks() },
-                    onClearTracks = { tracks.clear(); currentTrackIndex = -1; mediaController?.stop() },
-                    onSharePlaylist = { sharePlaylist() }
+                    onToggleShuffle = {
+                        isShuffle = !isShuffle
+                        playerPrefs.edit().putBoolean("is_shuffle", isShuffle).apply()
+                    },
+                    onToggleRepeat = {
+                        repeatMode = (repeatMode + 1) % 3
+                        playerPrefs.edit().putInt("repeat_mode", repeatMode).apply()
+                    },
+                    onPickSpecificFolder = { folderPickerLauncher.launch(null) },
+                    onScanAllDeviceMusic = {
+                        customFolderUri = null
+                        playerPrefs.edit().remove("custom_folder_uri").apply()
+                        hiddenTrackIds.clear()
+                        refreshLocalTracksAsync(toastOnComplete = true)
+                    },
+                    onImportPlaylist = {
+                        importPlaylistLauncher.launch(
+                            arrayOf(
+                                "audio/x-mpegurl",
+                                "audio/mpegurl",
+                                "application/vnd.apple.mpegurl",
+                                "application/x-mpegurl",
+                                "text/plain",
+                                "*/*"
+                            )
+                        )
+                    },
+                    onExportPlaylist = { exportSmartPlaylist() },
+                    onClearTracks = {
+                        tracks.clear()
+                        currentTrackIndex = -1
+                        isPlaying = false
+                        mediaController?.stop()
+                    },
+                    onShareSingleTrack = { track -> shareSingleTrack(track) },
+                    onRemoveTrackFromList = { track ->
+                        hiddenTrackIds.add(track.id)
+                        removeTrackEntryById(track.id)
+                    },
+                    onDeleteTrackFromDevice = { track -> deleteTrackFromDevice(track) }
                 )
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingPlaylistIntent(intent)
+    }
+
+    private fun handleIncomingPlaylistIntent(incoming: Intent?) {
+        if (incoming?.action == Intent.ACTION_VIEW) {
+            val dataUri = incoming.data ?: return
+            lifecycleScope.launch {
+                // İlk açılışta yerel parça taramasının tamamlanmasına kısa süre tanı
+                delay(350)
+                importSmartPlaylist(dataUri)
+            }
+        }
+    }
+
+    // ==================== CANLI JAM MİLİSANİYE SENKRONİZASYON MOTORU ====================
+
+    private fun computeWantedJamLiveMs(): Long {
+        val elapsed = if (jamWantPlaying && jamWantRecvTimeMs > 0L) {
+            (System.currentTimeMillis() - jamWantRecvTimeMs).coerceAtLeast(0L) + 45L
+        } else {
+            0L
+        }
+        return (jamWantBaseMs + elapsed).coerceAtLeast(0L)
+    }
+
+    private fun cancelJamAutoDownload() {
+        jamAutoDlJob?.cancel()
+        jamAutoDlJob = null
+        jamWantTitle = ""
+        jamWantYtId = ""
+    }
+
+    private fun setupJamCallbacks() {
+        // 1. Odadaki herhangi bir katılımcı şarkı açtığında veya durum bildirdiğinde (JAM_STATE)
+        friendsManager.onRemoteJamStateRequest = { title, ytId, remotePlaying, posMs, recvTimeMs ->
+            runOnUiThread {
+                if (!friendsManager.jamState.value.isActive) return@runOnUiThread
+
+                val netElapsed = (System.currentTimeMillis() - recvTimeMs).coerceIn(0L, 5000L)
+                val liveMs = (posMs + if (remotePlaying) (netElapsed + 45L) else 0L).coerceAtLeast(0L)
+
+                // A) Zaten aynı parça açık mı? Yalnızca kayma varsa milisaniye hizala!
+                if (currentTrackIndex in tracks.indices &&
+                    MusicScanner.isSameTrack(tracks[currentTrackIndex], title, ytId)
+                ) {
+                    if (jamAutoDlJob?.isActive == true) {
+                        cancelJamAutoDownload()
+                    }
+                    friendsManager.setJamSyncStatus(
+                        if (remotePlaying) "✓ Canlı milisaniye senkronize" else "⏸ Ortak duraklatıldı",
+                        isDownloading = false
+                    )
+                    mediaController?.let { p ->
+                        val drift = abs(p.currentPosition - liveMs)
+                        val threshold = if (remotePlaying) 450L else 220L
+                        if (drift > threshold) {
+                            p.seekTo(liveMs)
+                            currentPositionFlow.value = (liveMs / 1000L).toInt()
+                        }
+                        if (remotePlaying && !p.isPlaying) {
+                            p.play()
+                            isPlaying = true
+                        } else if (!remotePlaying && p.isPlaying) {
+                            p.pause()
+                            isPlaying = false
+                        }
+                    }
+                    return@runOnUiThread
+                }
+
+                // B) Parça yerel kütüphanede mevcut mu? Atomik olarak tam canlı milisaniyede aç!
+                val foundIdx = MusicScanner.findBestTrackMatch(tracks, title, ytId)
+                if (foundIdx >= 0) {
+                    cancelJamAutoDownload()
+                    friendsManager.setJamSyncStatus(
+                        if (remotePlaying) "✓ Canlı milisaniye senkronize" else "⏸ Ortak duraklatıldı",
+                        isDownloading = false
+                    )
+                    playTrack(
+                        index = foundIdx,
+                        startPosMs = liveMs,
+                        startPlaying = remotePlaying,
+                        isRemoteSync = true
+                    )
+                    return@runOnUiThread
+                }
+
+                // C) Parça bu cihazda YOK! Mevcut müziği durdur, arka planda indir, bitince 00:00 yerine CANLI SANİYEDEN başlat!
+                mediaController?.pause()
+                isPlaying = false
+
+                val alreadyDownloadingSame = jamAutoDlJob?.isActive == true && (
+                    (ytId.length == 11 && ytId.equals(jamWantYtId, ignoreCase = true)) ||
+                    (title.isNotBlank() && MusicScanner.normalizeForMatch(title) == MusicScanner.normalizeForMatch(jamWantTitle))
+                )
+
+                jamWantTitle = title
+                jamWantYtId = ytId
+                jamWantBaseMs = posMs
+                jamWantRecvTimeMs = recvTimeMs
+                jamWantPlaying = remotePlaying
+
+                if (alreadyDownloadingSame) {
+                    return@runOnUiThread
+                }
+
+                jamAutoDlJob?.cancel()
+                val displayTitle = title.ifBlank { "Ortak Jam Parçası" }
+                friendsManager.setJamSyncStatus("⚡ Sende yok, indiriliyor: $displayTitle", isDownloading = true)
+
+                jamAutoDlJob = lifecycleScope.launch {
+                    try {
+                        var targetVideoId = if (ytId.length == 11) ytId else ""
+                        var dlTitle = displayTitle
+                        var dlArtist = ""
+
+                        if (targetVideoId.isEmpty() && title.isNotBlank()) {
+                            val best = withContext(Dispatchers.IO) {
+                                InnertubeResolver.search(title).firstOrNull()
+                            }
+                            if (best != null) {
+                                targetVideoId = best.videoId
+                                if (dlTitle == "Ortak Jam Parçası") dlTitle = best.title
+                                dlArtist = best.artist
+                            }
+                        }
+
+                        if (!isActive || targetVideoId.isEmpty()) {
+                            friendsManager.setJamSyncStatus("Parça kaynağı bulunamadı", isDownloading = false)
+                            return@launch
+                        }
+
+                        val ok = downloadManager.downloadTrackSync(
+                            videoId = targetVideoId,
+                            title = dlTitle,
+                            artist = dlArtist,
+                            customHeadline = "⚡ JAM ORTAK PARÇA İNDİRİLİYOR"
+                        )
+
+                        if (!isActive || !friendsManager.jamState.value.isActive) return@launch
+
+                        if (ok) {
+                            // MediaStore kaydının tamamlanması için kısa bekleme ve kütüphane yenileme
+                            delay(180)
+                            val updated = withContext(Dispatchers.IO) {
+                                MusicScanner.scanLocalTracks(this@MainActivity, customFolderUri)
+                                    .filterNot { it.id in hiddenTrackIds }
+                            }
+                            applyUpdatedTrackList(updated)
+
+                            val matchIdx = MusicScanner.findBestTrackMatch(
+                                tracks,
+                                jamWantTitle.ifBlank { dlTitle },
+                                targetVideoId
+                            )
+                            if (matchIdx >= 0) {
+                                val catchUpMs = computeWantedJamLiveMs()
+                                val shouldPlay = jamWantPlaying
+                                jamWantTitle = ""
+                                jamWantYtId = ""
+
+                                friendsManager.setJamSyncStatus(
+                                    "✓ Ortak parça indirildi • Canlı saniyeye eşitlendi",
+                                    isDownloading = false
+                                )
+                                playTrack(
+                                    index = matchIdx,
+                                    startPosMs = catchUpMs,
+                                    startPlaying = shouldPlay,
+                                    isRemoteSync = true
+                                )
+                                // İndirme biter bitmez anlık faz kilidi için odaya güncel milisaniyeyi sor!
+                                friendsManager.requestJamPartnerState()
+                                delay(850)
+                                if (isActive && friendsManager.jamState.value.isActive) {
+                                    friendsManager.requestJamPartnerState()
+                                }
+                            } else {
+                                friendsManager.setJamSyncStatus("İndirilen parça eşleştirilemedi", isDownloading = false)
+                            }
+                        } else {
+                            friendsManager.setJamSyncStatus("Ortak parça indirilemedi", isDownloading = false)
+                        }
+                    } finally {
+                        if (jamAutoDlJob == coroutineContext[Job]) {
+                            jamAutoDlJob = null
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Odadaki bir katılımcı duraklattığında, devam ettirdiğinde veya sardığında (JAM_POS)
+        friendsManager.onRemoteJamPosRequest = { playFlag, posMs, recvTimeMs ->
+            runOnUiThread {
+                if (!friendsManager.jamState.value.isActive) return@runOnUiThread
+
+                // Şarkı şu an arka planda indiriliyorsa hedef saniye ve çalma durumunu canlı güncelle!
+                if (jamAutoDlJob?.isActive == true) {
+                    jamWantBaseMs = posMs
+                    jamWantRecvTimeMs = recvTimeMs
+                    if (playFlag == 0) jamWantPlaying = false
+                    else if (playFlag == 1) jamWantPlaying = true
+                    return@runOnUiThread
+                }
+
+                // Henüz aktif bir şarkımız yoksa odadan tam şarkı durumunu iste (Kendi kendini onarma)
+                if (currentTrackIndex !in tracks.indices) {
+                    friendsManager.requestJamPartnerState()
+                    return@runOnUiThread
+                }
+
+                val netElapsed = (System.currentTimeMillis() - recvTimeMs).coerceIn(0L, 3000L)
+                mediaController?.let { p ->
+                    when {
+                        playFlag == 0 -> {
+                            p.pause()
+                            val safeMs = posMs.coerceAtLeast(0L)
+                            p.seekTo(safeMs)
+                            isPlaying = false
+                            currentPositionFlow.value = (safeMs / 1000L).toInt()
+                        }
+                        playFlag == 1 -> {
+                            val liveMs = (posMs + netElapsed).coerceAtLeast(0L)
+                            if (abs(p.currentPosition - liveMs) > 300L) {
+                                p.seekTo(liveMs)
+                            }
+                            p.play()
+                            isPlaying = true
+                            currentPositionFlow.value = (liveMs / 1000L).toInt()
+                        }
+                        else -> {
+                            val liveMs = (posMs + if (p.isPlaying) netElapsed else 0L).coerceAtLeast(0L)
+                            p.seekTo(liveMs)
+                            currentPositionFlow.value = (liveMs / 1000L).toInt()
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Odaya yeni katılan veya indirmesini bitiren bir üye anlık milisaniyemizi sorduğunda (JAM_ASK)
+        friendsManager.onRemoteJamAskRequest = { requesterTag ->
+            runOnUiThread {
+                if (jamAutoDlJob?.isActive != true && currentTrackIndex in tracks.indices) {
+                    val tr = tracks[currentTrackIndex]
+                    mediaController?.let { p ->
+                        friendsManager.sendJamStateToPeer(
+                            targetTag = requesterTag,
+                            title = tr.title,
+                            ytId = tr.ytId ?: "",
+                            isPlaying = p.isPlaying,
+                            posMs = p.currentPosition.coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+        }
+
+        friendsManager.onJamRoomClosed = {
+            runOnUiThread {
+                cancelJamAutoDownload()
+            }
+        }
+    }
+
+    // ==================== İZİNLER, TARAMA & MEDYA OYNATICI ====================
 
     private fun checkAndRequestPermissions() {
         val permissions = mutableListOf<String>()
@@ -238,16 +561,50 @@ class MainActivity : ComponentActivity() {
         }
 
         if (needed.isEmpty()) {
-            loadLocalTracks()
+            refreshLocalTracksAsync()
         } else {
             permissionLauncher.launch(needed.toTypedArray())
         }
     }
 
-    private fun loadLocalTracks() {
-        val list = MusicScanner.scanLocalTracks(this)
+    private fun applyUpdatedTrackList(newList: List<Track>) {
+        val prevPlayingTrack = tracks.getOrNull(currentTrackIndex)
         tracks.clear()
-        tracks.addAll(list)
+        tracks.addAll(newList)
+        if (prevPlayingTrack != null) {
+            currentTrackIndex = tracks.indexOfFirst {
+                it.id == prevPlayingTrack.id ||
+                (prevPlayingTrack.path.isNotBlank() && it.path == prevPlayingTrack.path)
+            }
+        } else if (currentTrackIndex >= tracks.size) {
+            currentTrackIndex = -1
+        }
+    }
+
+    private fun refreshLocalTracksAsync(toastOnComplete: Boolean = false) {
+        lifecycleScope.launch {
+            val list = withContext(Dispatchers.IO) {
+                MusicScanner.scanLocalTracks(this@MainActivity, customFolderUri)
+                    .filterNot { it.id in hiddenTrackIds }
+            }
+            applyUpdatedTrackList(list)
+            if (toastOnComplete) {
+                Toast.makeText(this@MainActivity, "✓ ${list.size} parça yüklendi", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun removeTrackEntryById(trackId: Long) {
+        val idx = tracks.indexOfFirst { it.id == trackId }
+        if (idx == -1) return
+        if (idx == currentTrackIndex) {
+            mediaController?.stop()
+            currentTrackIndex = -1
+            isPlaying = false
+        } else if (idx < currentTrackIndex) {
+            currentTrackIndex -= 1
+        }
+        tracks.removeAt(idx)
     }
 
     private fun initMediaController() {
@@ -259,84 +616,120 @@ class MainActivity : ComponentActivity() {
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
                     val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
+                    // Yalnızca arkadaş durum kartını günceller; Jam sıfırlama yayını yapmaz!
                     friendsManager.updateLocalPlaybackState(playing, title)
                 }
+
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     if (playbackState == Player.STATE_ENDED) {
-                        if (isRepeat) {
-                            playTrack(currentTrackIndex)
-                        } else {
-                            playNext()
-                        }
+                        playNext(fromAutoEnd = true)
                     }
                 }
             })
-            setupProgressTicker()
+            pendingControllerAction?.invoke()
+            pendingControllerAction = null
+            progressHandler.removeCallbacks(progressRunnable)
+            progressHandler.post(progressRunnable)
         }, MoreExecutors.directExecutor())
     }
 
-    private fun setupProgressTicker() {
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        handler.post(object : Runnable {
-            override fun run() {
-                mediaController?.let { p ->
-                    currentPositionFlow.value = (p.currentPosition / 1000).toInt()
-                    durationFlow.value = if (p.duration > 0) (p.duration / 1000).toInt() else 0
-                }
-                handler.postDelayed(this, 1000)
-            }
-        })
-    }
-
-    private fun playTrack(index: Int, isRemoteSync: Boolean = false) {
-        if (index < 0 || index >= tracks.size) return
+    private fun playTrack(
+        index: Int,
+        startPosMs: Long = 0L,
+        startPlaying: Boolean = true,
+        isRemoteSync: Boolean = false
+    ) {
+        if (index !in tracks.indices) return
         currentTrackIndex = index
         val track = tracks[index]
-        mediaController?.let { p ->
-            p.setMediaItem(MediaItem.fromUri(track.uri))
-            p.prepare()
-            p.play()
+        val safeStartMs = startPosMs.coerceAtLeast(0L)
+        isPlaying = startPlaying
+        currentPositionFlow.value = (safeStartMs / 1000L).toInt()
+        if (track.durationSec > 0) {
+            durationFlow.value = track.durationSec
         }
-        friendsManager.updateLocalPlaybackState(true, track.title)
+
+        val openAction = {
+            mediaController?.let { p ->
+                // Atomik milisaniye açılışı: 00:00'dan tek bir ses örneği bile çalmadan doğrudan hedef milisaniyede başlar!
+                p.setMediaItem(MediaItem.fromUri(track.uri), safeStartMs)
+                p.prepare()
+                p.playWhenReady = startPlaying
+            }
+            Unit
+        }
+
+        if (mediaController != null) {
+            openAction()
+        } else {
+            pendingControllerAction = openAction
+        }
+
+        friendsManager.updateLocalPlaybackState(startPlaying, track.title)
         if (!isRemoteSync && friendsManager.jamState.value.isActive) {
-            friendsManager.broadcastJamState(track.title, true, 0)
+            cancelJamAutoDownload()
+            friendsManager.broadcastJamState(
+                title = track.title,
+                ytId = track.ytId ?: "",
+                isPlaying = startPlaying,
+                posMs = safeStartMs
+            )
         }
     }
 
     private fun togglePlayPause() {
         mediaController?.let { p ->
-            val curPos = (p.currentPosition / 1000).toInt()
+            val curPosMs = p.currentPosition.coerceAtLeast(0L)
+            val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
             if (p.isPlaying) {
                 p.pause()
-                val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
+                isPlaying = false
                 friendsManager.updateLocalPlaybackState(false, title)
-                friendsManager.broadcastJamPos(0, curPos)
+                if (friendsManager.jamState.value.isActive) {
+                    friendsManager.broadcastJamPos(0, curPosMs)
+                }
             } else {
                 p.play()
-                val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
+                isPlaying = true
                 friendsManager.updateLocalPlaybackState(true, title)
-                friendsManager.broadcastJamPos(1, curPos)
+                if (friendsManager.jamState.value.isActive) {
+                    friendsManager.broadcastJamPos(1, curPosMs)
+                }
             }
         }
     }
 
     private fun seekTo(sec: Int, isRemoteSync: Boolean = false) {
-        mediaController?.seekTo(sec * 1000L)
+        val safeSec = sec.coerceAtLeast(0)
+        val targetMs = safeSec * 1000L
+        mediaController?.seekTo(targetMs)
+        currentPositionFlow.value = safeSec
         if (!isRemoteSync && currentTrackIndex in tracks.indices && friendsManager.jamState.value.isActive) {
-            val title = tracks[currentTrackIndex].title
-            friendsManager.broadcastJamState(title, isPlaying, sec)
-            friendsManager.broadcastJamPos(-1, sec)
+            friendsManager.broadcastJamPos(-1, targetMs)
         }
     }
 
-    private fun playNext() {
+    private fun playNext(fromAutoEnd: Boolean = false) {
         if (tracks.isEmpty()) return
-        val next = if (isShuffle) {
-            (tracks.indices).random()
-        } else {
-            (currentTrackIndex + 1) % tracks.size
+        if (fromAutoEnd && repeatMode == 2 && currentTrackIndex in tracks.indices) {
+            playTrack(currentTrackIndex)
+            return
         }
-        playTrack(next)
+        val next = when {
+            isShuffle && tracks.size > 1 -> {
+                var rnd = tracks.indices.random()
+                if (rnd == currentTrackIndex) rnd = (rnd + 1) % tracks.size
+                rnd
+            }
+            currentTrackIndex + 1 < tracks.size -> currentTrackIndex + 1
+            !fromAutoEnd || repeatMode == 1 -> 0
+            else -> -1
+        }
+        if (next in tracks.indices) {
+            playTrack(next)
+        } else {
+            isPlaying = false
+        }
     }
 
     private fun playPrev() {
@@ -345,32 +738,281 @@ class MainActivity : ComponentActivity() {
         playTrack(prev)
     }
 
-    private fun sharePlaylist() {
+    // ==================== AKILLI OYNATMA LİSTESİ İÇE / DIŞA AKTARMA (.m3u8) ====================
+
+    private fun extractYtIdFromUrl(url: String): String? {
+        val afterV = url.substringAfter("v=", "").take(11)
+        if (afterV.length == 11 && afterV.all { it.isLetterOrDigit() || it == '_' || it == '-' }) {
+            return afterV
+        }
+        val afterShort = url.substringAfter("youtu.be/", "").take(11)
+        if (afterShort.length == 11 && afterShort.all { it.isLetterOrDigit() || it == '_' || it == '-' }) {
+            return afterShort
+        }
+        return null
+    }
+
+    private fun exportSmartPlaylist() {
         if (tracks.isEmpty()) {
-            Toast.makeText(this, "Paylaşılacak parça yok!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Dışa aktarılacak parça yok!", Toast.LENGTH_SHORT).show()
             return
         }
-        val text = buildString {
-            append("🎶 ΛURNS Çalma Listem (${tracks.size} parça):\n\n")
-            tracks.take(20).forEachIndexed { i, t ->
-                append("${i + 1}. ${t.title} - ${t.artist}\n")
+        try {
+            val m3uContent = buildString {
+                append("#EXTM3U\n")
+                for (t in tracks) {
+                    val yt = t.ytId ?: MusicScanner.extractYouTubeId(t.path)
+                    if (!yt.isNullOrBlank() && yt.length == 11) {
+                        append("#EXTAURNS:YTID=").append(yt).append('\n')
+                    }
+                    val fullTitle = if (
+                        t.title.contains(" - ") ||
+                        t.artist.isBlank() ||
+                        t.artist == "Yerel Parça" ||
+                        t.artist == "İndirilen Parça"
+                    ) {
+                        t.title
+                    } else {
+                        "${t.artist} - ${t.title}"
+                    }
+                    append("#EXTINF:-1,").append(fullTitle).append('\n')
+                    append(t.path.ifBlank { t.uri.toString() }).append('\n')
+                }
             }
-            if (tracks.size > 20) append("...ve ${tracks.size - 20} parça daha!")
+
+            val outFile = File(cacheDir, "Aurns_Listem.m3u8")
+            outFile.writeText(m3uContent, Charsets.UTF_8)
+            val contentUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", outFile)
+
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "audio/x-mpegurl"
+                putExtra(Intent.EXTRA_STREAM, contentUri)
+                putExtra(Intent.EXTRA_SUBJECT, "ΛURNS Akıllı Çalma Listesi (${tracks.size} Parça)")
+                clipData = ClipData.newRawUri("Aurns_Listem.m3u8", contentUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Akıllı Çalma Listesini Paylaş (.m3u8)"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Liste dışa aktarılamadı: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
         }
-        val sendIntent = Intent().apply {
-            action = Intent.ACTION_SEND
-            putExtra(Intent.EXTRA_TEXT, text)
-            type = "text/plain"
+    }
+
+    private fun importSmartPlaylist(uri: Uri) {
+        lifecycleScope.launch {
+            val parsedResult = withContext(Dispatchers.IO) {
+                try {
+                    val lines = contentResolver.openInputStream(uri)
+                        ?.bufferedReader(Charsets.UTF_8)
+                        ?.use { it.readLines() } ?: return@withContext null
+
+                    var pendingTitle = ""
+                    var pendingYtId = ""
+                    var matchedLocalCount = 0
+                    val missing = ArrayList<Pair<String, String>>()
+
+                    for (rawLine in lines) {
+                        val s = rawLine.removePrefix("\uFEFF").trim()
+                        if (s.isEmpty()) continue
+
+                        if (s.startsWith("#")) {
+                            if (s.startsWith("#EXTAURNS:YTID=", ignoreCase = true)) {
+                                val idCandidate = s.substring(15).trim()
+                                if (idCandidate.length == 11) pendingYtId = idCandidate
+                            } else if (s.startsWith("#EXTINF:", ignoreCase = true)) {
+                                val comma = s.indexOf(',')
+                                if (comma >= 0 && comma + 1 < s.length) {
+                                    pendingTitle = s.substring(comma + 1).trim()
+                                }
+                            }
+                            continue
+                        }
+
+                        val isUrl = s.startsWith("http://", ignoreCase = true) || s.startsWith("https://", ignoreCase = true)
+                        if (pendingYtId.isEmpty()) {
+                            pendingYtId = (if (isUrl) extractYtIdFromUrl(s) else MusicScanner.extractYouTubeId(s)) ?: ""
+                        }
+                        if (pendingTitle.isEmpty() && !isUrl) {
+                            val fileName = s.substringAfterLast('/').substringAfterLast('\\')
+                            pendingTitle = MusicScanner.cleanDisplayTitle(fileName.substringBeforeLast('.'), fileName)
+                        }
+                        if (pendingTitle.isEmpty() && pendingYtId.isNotEmpty()) {
+                            pendingTitle = "YouTube Parçası ($pendingYtId)"
+                        }
+
+                        val existingIdx = MusicScanner.findBestTrackMatch(tracks, pendingTitle, pendingYtId)
+                        if (existingIdx >= 0) {
+                            matchedLocalCount++
+                        } else if (pendingTitle.isNotEmpty() || pendingYtId.isNotEmpty()) {
+                            val isDup = missing.any { (mTitle, mYt) ->
+                                (pendingYtId.isNotEmpty() && mYt.equals(pendingYtId, ignoreCase = true)) ||
+                                (pendingTitle.isNotEmpty() && mTitle.equals(pendingTitle, ignoreCase = true))
+                            }
+                            if (!isDup) {
+                                missing.add(Pair(pendingTitle, pendingYtId))
+                            }
+                        }
+
+                        pendingTitle = ""
+                        pendingYtId = ""
+                    }
+                    Pair(matchedLocalCount, missing)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+
+            if (parsedResult == null) {
+                Toast.makeText(this@MainActivity, "Çalma listesi okunamadı!", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            val (matchedCount, missingList) = parsedResult
+            if (missingList.isEmpty()) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "✓ Listedeki $matchedCount parçanın tamamı kütüphanenizde hazır!",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@launch
+            }
+
+            Toast.makeText(
+                this@MainActivity,
+                "⚡ $matchedCount parça hazır • Eksik ${missingList.size} parça otomatik indiriliyor...",
+                Toast.LENGTH_LONG
+            ).show()
+
+            playlistImportJob?.cancel()
+            playlistImportJob = lifecycleScope.launch {
+                var downloadedOk = 0
+                missingList.forEachIndexed { idx, (mTitle, mYtId) ->
+                    if (!isActive) return@launch
+                    val headline = "PAYLAŞILAN LİSTE YÜKLENİYOR • ${idx + 1} / ${missingList.size} Parça"
+                    downloadManager.showBannerMessage(headline, mTitle, 0, isRunning = true)
+
+                    var targetVid = if (mYtId.length == 11) mYtId else ""
+                    var dlTitle = mTitle
+                    var dlArtist = ""
+                    if (targetVid.isEmpty()) {
+                        val best = withContext(Dispatchers.IO) {
+                            InnertubeResolver.search(mTitle).firstOrNull()
+                        }
+                        if (best != null) {
+                            targetVid = best.videoId
+                            dlTitle = best.title
+                            dlArtist = best.artist
+                        }
+                    }
+
+                    if (targetVid.isNotEmpty()) {
+                        val ok = downloadManager.downloadTrackSync(
+                            videoId = targetVid,
+                            title = dlTitle,
+                            artist = dlArtist,
+                            customHeadline = headline
+                        )
+                        if (ok) {
+                            downloadedOk++
+                            delay(150)
+                            val refreshed = withContext(Dispatchers.IO) {
+                                MusicScanner.scanLocalTracks(this@MainActivity, customFolderUri)
+                                    .filterNot { it.id in hiddenTrackIds }
+                            }
+                            applyUpdatedTrackList(refreshed)
+                        }
+                    }
+                }
+                downloadManager.showBannerMessage(
+                    "✓ PAYLAŞILAN LİSTE TAMAMLANDI",
+                    "$downloadedOk yeni parça kütüphaneye eklendi",
+                    100,
+                    isRunning = false,
+                    isDone = true
+                )
+            }
         }
-        startActivity(Intent.createChooser(sendIntent, "Çalma Listesini Paylaş"))
+    }
+
+    // ==================== TEKİL PARÇA PAYLAŞIMI & CİHAZDAN SİLME ====================
+
+    private fun shareSingleTrack(track: Track) {
+        try {
+            val shareUri = when {
+                track.uri.scheme == "content" -> track.uri
+                track.path.isNotBlank() && File(track.path).exists() ->
+                    FileProvider.getUriForFile(this, "$packageName.fileprovider", File(track.path))
+                else -> track.uri
+            }
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "audio/*"
+                putExtra(Intent.EXTRA_STREAM, shareUri)
+                putExtra(Intent.EXTRA_TITLE, track.title)
+                clipData = ClipData.newRawUri(track.title, shareUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(sendIntent, "Parçayı Paylaş"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Parça paylaşılamadı: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun deleteTrackFromDevice(track: Track) {
+        try {
+            if (track.uri.scheme == "file" && track.path.isNotBlank()) {
+                val f = File(track.path)
+                if (!f.exists() || f.delete()) {
+                    removeTrackEntryById(track.id)
+                    Toast.makeText(this, "✓ Parça cihazdan silindi", Toast.LENGTH_SHORT).show()
+                    return
+                }
+            }
+
+            if (DocumentsContract.isDocumentUri(this, track.uri)) {
+                if (DocumentsContract.deleteDocument(contentResolver, track.uri)) {
+                    removeTrackEntryById(track.id)
+                    Toast.makeText(this, "✓ Parça cihazdan silindi", Toast.LENGTH_SHORT).show()
+                    return
+                }
+            }
+
+            val deletedRows = contentResolver.delete(track.uri, null, null)
+            val fallbackDeleted = if (track.path.isNotBlank()) {
+                val f = File(track.path)
+                f.exists() && f.delete()
+            } else false
+
+            if (deletedRows > 0 || fallbackDeleted) {
+                removeTrackEntryById(track.id)
+                Toast.makeText(this, "✓ Parça cihazdan silindi", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Dosya silinemedi veya bulunamadı.", Toast.LENGTH_SHORT).show()
+            }
+        } catch (_: SecurityException) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && track.uri.scheme == "content") {
+                try {
+                    val pi = MediaStore.createDeleteRequest(contentResolver, listOf(track.uri))
+                    pendingDeleteTrackId = track.id
+                    deleteRequestLauncher.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+                    return
+                } catch (_: Exception) {}
+            }
+            Toast.makeText(this, "Sistem bu dosyanın silinmesine izin vermedi.", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Silme hatası: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onDestroy() {
+        progressHandler.removeCallbacks(progressRunnable)
+        cancelJamAutoDownload()
+        playlistImportJob?.cancel()
         friendsManager.onDestroy()
         controllerFuture?.let { MediaController.releaseFuture(it) }
         super.onDestroy()
     }
 }
+
+// ==================== ANA EKRAN ====================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -379,7 +1021,8 @@ fun MainScreen(
     currentTrackIndex: Int,
     isPlaying: Boolean,
     isShuffle: Boolean,
-    isRepeat: Boolean,
+    repeatMode: Int,
+    hasCustomFolder: Boolean,
     currentPositionFlow: MutableStateFlow<Int>,
     durationFlow: MutableStateFlow<Int>,
     downloadManager: AudioDownloadManager,
@@ -391,42 +1034,57 @@ fun MainScreen(
     onPrev: () -> Unit,
     onToggleShuffle: () -> Unit,
     onToggleRepeat: () -> Unit,
-    onRefreshTracks: () -> Unit,
+    onPickSpecificFolder: () -> Unit,
+    onScanAllDeviceMusic: () -> Unit,
+    onImportPlaylist: () -> Unit,
+    onExportPlaylist: () -> Unit,
     onClearTracks: () -> Unit,
-    onSharePlaylist: () -> Unit
+    onShareSingleTrack: (Track) -> Unit,
+    onRemoveTrackFromList: (Track) -> Unit,
+    onDeleteTrackFromDevice: (Track) -> Unit
 ) {
+    val context = LocalContext.current
     var isDrawerOpen by remember { mutableStateOf(false) }
     var isDownloadSheetOpen by remember { mutableStateOf(false) }
     var isFriendsPanelOpen by remember { mutableStateOf(false) }
     var isUpdateDialogOpen by remember { mutableStateOf(false) }
+    var isFolderDialogOpen by remember { mutableStateOf(false) }
+    var contextMenuTrack by remember { mutableStateOf<Track?>(null) }
+    var confirmDeleteTrack by remember { mutableStateOf<Track?>(null) }
     var searchQuery by remember { mutableStateOf("") }
 
     val dlProgress by downloadManager.currentProgress.collectAsState()
     val jamState by friendsManager.jamState.collectAsState()
     val pendingRequests by friendsManager.pendingRequests.collectAsState()
 
-    // Geri tuşu kontrolü
     BackHandler(enabled = isFriendsPanelOpen || isDrawerOpen) {
         if (isFriendsPanelOpen) isFriendsPanelOpen = false
         else if (isDrawerOpen) isDrawerOpen = false
     }
 
-    // Arama filtrelemesi
-    val filteredTracks = remember(tracks, searchQuery) {
-        if (searchQuery.isBlank()) tracks
-        else tracks.filter {
-            it.title.contains(searchQuery, ignoreCase = true) ||
-            it.artist.contains(searchQuery, ignoreCase = true)
+    // Türkçe karakter duyarsız hızlı arama (Windows src/playlist.c ile birebir)
+    val filteredTracks = remember(tracks.size, tracks.hashCode(), searchQuery) {
+        if (searchQuery.isBlank()) {
+            tracks
+        } else {
+            val normQ = MusicScanner.normalizeForMatch(searchQuery)
+            tracks.filter { t ->
+                t.title.contains(searchQuery, ignoreCase = true) ||
+                t.artist.contains(searchQuery, ignoreCase = true) ||
+                (normQ.isNotEmpty() && (
+                    MusicScanner.normalizeForMatch(t.title).contains(normQ) ||
+                    MusicScanner.normalizeForMatch(t.artist).contains(normQ)
+                ))
+            }
         }
     }
 
-    val currentPlayingTrackId = remember(tracks, currentTrackIndex) {
+    val currentPlayingTrackId = remember(tracks.size, currentTrackIndex) {
         if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].id else -1L
     }
 
     Box(modifier = Modifier.fillMaxSize().background(BgObsidian)) {
 
-        // ANA EKRAN İÇERİĞİ
         Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
 
             // 1. ÜST ÇUBUK (HEADER - Windows ΛURNS ile %100 Birebir)
@@ -444,7 +1102,7 @@ fun MainScreen(
                         if (pendingRequests.isNotEmpty()) {
                             Box(
                                 modifier = Modifier
-                                    .size(6.dp)
+                                    .size(7.dp)
                                     .clip(CircleShape)
                                     .background(AccentOrange)
                                     .align(Alignment.TopEnd)
@@ -455,7 +1113,6 @@ fun MainScreen(
 
                 Spacer(modifier = Modifier.width(4.dp))
 
-                // Windows ΛURNS ile %100 Birebir Neon Logo Amblemi
                 Image(
                     painter = painterResource(id = R.drawable.app_logo),
                     contentDescription = "ΛURNS Logo",
@@ -476,12 +1133,13 @@ fun MainScreen(
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                // [Arkadaşlar] Butonu
+                // [Arkadaşlar / Jam (X)] Butonu
+                val roomActiveOrInviting = jamState.isActive || jamState.isInviting
                 Surface(
                     onClick = { isFriendsPanelOpen = true },
                     shape = RoundedCornerShape(16.dp),
                     color = BgCard,
-                    border = BorderStroke(1.dp, if (jamState.isActive) AccentPink else BorderDark),
+                    border = BorderStroke(1.dp, if (roomActiveOrInviting) AccentPink else BorderDark),
                     modifier = Modifier.padding(end = 8.dp)
                 ) {
                     Row(
@@ -492,7 +1150,7 @@ fun MainScreen(
                             Icon(
                                 Icons.Default.Groups,
                                 contentDescription = null,
-                                tint = if (jamState.isActive) AccentPink else AccentOrange,
+                                tint = if (roomActiveOrInviting) AccentPink else AccentOrange,
                                 modifier = Modifier.size(16.dp)
                             )
                             if (pendingRequests.isNotEmpty()) {
@@ -507,7 +1165,11 @@ fun MainScreen(
                         }
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (jamState.isActive) "Jam Aktif" else "Arkadaşlar",
+                            text = when {
+                                jamState.isActive -> "Jam (${jamState.totalParticipantCount})"
+                                jamState.isInviting -> "Davet..."
+                                else -> "Arkadaşlar"
+                            },
                             color = TextWhite,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold
@@ -571,12 +1233,12 @@ fun MainScreen(
                 )
             )
 
-            // EVRENSEL CANLI İNDİRME ÇUBUĞU (MYT Hızı & Gerçek Zamanlı %)
+            // EVRENSEL CANLI İNDİRME ÇUBUĞU (Tekil, Jam Ortak Parça ve Paylaşılan Liste Kuyruğu)
             AnimatedVisibility(visible = dlProgress.isRunning || dlProgress.isDone || dlProgress.error != null) {
                 DownloadProgressBanner(dlProgress = dlProgress, onCancel = { downloadManager.cancelActiveDownload() })
             }
 
-            // GELEN JAM DAVETİ BİLDİRİMİ (Phone <-> Phone & Phone <-> PC)
+            // GELEN JAM DAVETİ BİLDİRİMİ (Sınırsız Oda Katılımı)
             AnimatedVisibility(visible = jamState.hasIncomingInvite) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
@@ -602,13 +1264,13 @@ fun MainScreen(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "${jamState.inviterName} seni Jam'e davet etti!",
+                                text = "${jamState.inviterName} seni Jam odasına davet etti!",
                                 color = TextWhite,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Birlikte aynı şarkıyı canlı dinleyin",
+                                text = "Odadaki herkesle aynı saniyede canlı dinle",
                                 color = TextDim,
                                 fontSize = 11.sp
                             )
@@ -645,8 +1307,8 @@ fun MainScreen(
                 }
             }
 
-            // AKTİF JAM OTURUMU BİLGİ BANDI (Phone <-> Phone & Phone <-> PC)
-            AnimatedVisibility(visible = jamState.isActive) {
+            // AKTİF VEYA KURULMAKTA OLAN ÇOK KİŞİLİ JAM ODASI BİLGİ BANDI
+            AnimatedVisibility(visible = jamState.isActive || jamState.isInviting) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = Color(0xFF1E1428),
@@ -663,24 +1325,36 @@ fun MainScreen(
                             modifier = Modifier
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(AccentPink)
+                                .background(if (jamState.isActive) AccentPink else AccentOrange)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { isFriendsPanelOpen = true }
+                        ) {
                             Text(
-                                text = "🎧 JAM AKTİF • ${jamState.partnerName}",
+                                text = jamState.formatHeadline(),
                                 color = TextWhite,
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
+                            val subText = when {
+                                jamState.isDownloadingTrack -> jamState.syncStatus
+                                jamState.currentTrackTitle.isNotBlank() -> "${jamState.syncStatus} • ${jamState.currentTrackTitle}"
+                                else -> jamState.syncStatus
+                            }
                             Text(
-                                text = if (jamState.currentTrackTitle.isNotEmpty()) "Çalıyor: ${jamState.currentTrackTitle}" else "Senkronize müzik çalınıyor",
+                                text = subText,
                                 color = AccentOrange,
                                 fontSize = 10.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                        Spacer(modifier = Modifier.width(8.dp))
                         Surface(
                             onClick = { friendsManager.leaveJamRoom() },
                             shape = RoundedCornerShape(8.dp),
@@ -688,7 +1362,7 @@ fun MainScreen(
                             border = BorderStroke(0.5.dp, Color(0xFFFF3B30))
                         ) {
                             Text(
-                                text = "Ayrıl",
+                                text = if (jamState.isInviting && !jamState.isActive) "İptal" else "Ayrıl",
                                 color = Color(0xFFFF453A),
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -699,18 +1373,23 @@ fun MainScreen(
                 }
             }
 
-            // ŞARKI LİSTESİ (Sıfır Kasıntı, Doğru Şarkı Çalma Düzeltmesi)
+            // ŞARKI LİSTESİ
             if (filteredTracks.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 24.dp)) {
                         Icon(Icons.Default.MusicNote, contentDescription = null, tint = TextMuted, modifier = Modifier.size(44.dp))
                         Spacer(modifier = Modifier.height(8.dp))
                         Text("Müzik bulunamadı", color = TextDim, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text("Sol üst menüden klasör tarayabilir veya + İndir'e basabilirsiniz.", color = TextMuted, fontSize = 12.sp)
+                        Text(
+                            "Sol üst menüden klasör seçebilir, çalma listesi içe aktarabilir veya + İndir'e basabilirsiniz.",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
             } else {
@@ -726,26 +1405,26 @@ fun MainScreen(
                             isCurrent = isCurrent,
                             isPlaying = isPlaying,
                             onClick = {
-                                // KRİTİK DÜZELTME: Aramadaki şarkıya tıklandığında tam doğru parçanın çalınması
                                 val realIndex = tracks.indexOfFirst { it.id == track.id }
                                 if (realIndex != -1) {
                                     onPlayTrack(realIndex)
                                 }
-                            }
+                            },
+                            onOpenMenu = { contextMenuTrack = track }
                         )
                     }
                 }
             }
         }
 
-        // ALT YÜZEN OYNATICI DOCK (Recomposition İzolasyonu ile 60 FPS)
+        // ALT YÜZEN OYNATICI DOCK
         if (currentTrackIndex in tracks.indices) {
             val curTrack = tracks[currentTrackIndex]
             FloatingPlayerDock(
                 track = curTrack,
                 isPlaying = isPlaying,
                 isShuffle = isShuffle,
-                isRepeat = isRepeat,
+                repeatMode = repeatMode,
                 currentPositionFlow = currentPositionFlow,
                 durationFlow = durationFlow,
                 onTogglePlay = onTogglePlay,
@@ -783,25 +1462,24 @@ fun MainScreen(
                 targetOffsetX = { -it },
                 animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f)
             ) + fadeOut(tween(180)),
-            modifier = Modifier.fillMaxHeight().width(280.dp)
+            modifier = Modifier.fillMaxHeight().width(284.dp)
         ) {
             DrawerContent(
                 trackCount = tracks.size,
-                onScanFolder = { isDrawerOpen = false; onRefreshTracks() },
+                pendingCount = pendingRequests.size,
+                hasCustomFolder = hasCustomFolder,
+                onOpenFolderDialog = { isDrawerOpen = false; isFolderDialogOpen = true },
                 onOpenDownload = { isDrawerOpen = false; isDownloadSheetOpen = true },
                 onOpenFriends = { isDrawerOpen = false; isFriendsPanelOpen = true },
-                onImportPlaylist = {
-                    isDrawerOpen = false
-                    Toast.makeText(it, "Çalma listesi içe aktarılıyor...", Toast.LENGTH_SHORT).show()
-                },
-                onExportPlaylist = { isDrawerOpen = false; onSharePlaylist() },
+                onImportPlaylist = { isDrawerOpen = false; onImportPlaylist() },
+                onExportPlaylist = { isDrawerOpen = false; onExportPlaylist() },
                 onClearList = { isDrawerOpen = false; onClearTracks() },
                 onCheckUpdates = { isDrawerOpen = false; isUpdateDialogOpen = true },
                 onClose = { isDrawerOpen = false }
             )
         }
 
-        // ARKADAŞLAR VE JAM TAM EKRAN PANELİ
+        // ARKADAŞLAR VE SINIRSIZ KİŞİLİK JAM PANELİ
         AnimatedVisibility(
             visible = isFriendsPanelOpen,
             enter = slideInHorizontally(
@@ -831,36 +1509,371 @@ fun MainScreen(
             )
         }
 
-        // GÜNCELLEMELERİ DENETLE DİYALOĞU
-        if (isUpdateDialogOpen) {
+        // MÜZİK KLASÖRÜ SEÇİM DİYALOĞU (Windows Klasör Seçimi Eşleniği)
+        if (isFolderDialogOpen) {
             AlertDialog(
-                onDismissRequest = { isUpdateDialogOpen = false },
+                onDismissRequest = { isFolderDialogOpen = false },
                 containerColor = BgCard,
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = AccentOrange)
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, tint = AccentOrange)
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Güncellemeleri Denetle", color = TextWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Text("Müzik Klasörü Seç", color = TextWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     }
                 },
                 text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = if (hasCustomFolder) "Şu an özel seçilmiş bir klasörü dinliyorsunuz."
+                                   else "Şu an cihazdaki tüm müzik arşivini tarıyorsunuz.",
+                            color = TextDim,
+                            fontSize = 12.sp
+                        )
+                        Surface(
+                            onClick = {
+                                isFolderDialogOpen = false
+                                onPickSpecificFolder()
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = BgSurface,
+                            border = BorderStroke(1.dp, AccentOrange)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = AccentOrange)
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text("Belirli Klasör Seç", color = TextWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    Text("Yalnızca seçtiğiniz klasördeki ses dosyalarını yükler", color = TextMuted, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                        Surface(
+                            onClick = {
+                                isFolderDialogOpen = false
+                                onScanAllDeviceMusic()
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = BgSurface,
+                            border = BorderStroke(1.dp, BorderDark)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.LibraryMusic, contentDescription = null, tint = AccentPink)
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text("Tüm Cihaz Müziklerini Tara", color = TextWhite, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    Text("İndirilenler ve tüm yerel müzik klasörlerini birleştirir", color = TextMuted, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { isFolderDialogOpen = false }) {
+                        Text("Kapat", color = TextMuted)
+                    }
+                }
+            )
+        }
+
+        // PARÇA SAĞ TIK / UZUN BASMA MENÜSÜ (Windows Sağ Tık Menüsü ile %100 Birebir)
+        contextMenuTrack?.let { selectedTrack ->
+            ModalBottomSheet(
+                onDismissRequest = { contextMenuTrack = null },
+                containerColor = BgSurface,
+                dragHandle = { BottomSheetDefaults.DragHandle(color = BorderDark) }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
                     Text(
-                        "ΛURNS Android v1.1.0\nEn güncel sürümü kullanıyorsunuz.\n• Anında Stream İndirme (MYT Hızı)\n• Doğru Şarkı Arama Eşlemesi\n• 60 FPS Sıfır Kasıntı GPU Katmanı",
+                        text = selectedTrack.title,
+                        color = TextWhite,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = selectedTrack.artist,
+                        color = AccentOrange,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = BorderDark, thickness = 0.5.dp)
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    TrackContextActionRow(
+                        icon = Icons.Default.PlayArrow,
+                        label = "Şimdi Çal",
+                        tint = AccentOrange
+                    ) {
+                        val realIdx = tracks.indexOfFirst { it.id == selectedTrack.id }
+                        contextMenuTrack = null
+                        if (realIdx != -1) onPlayTrack(realIdx)
+                    }
+
+                    TrackContextActionRow(
+                        icon = Icons.Default.ContentCopy,
+                        label = "Parça Adını Kopyala",
+                        tint = TextWhite
+                    ) {
+                        val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cb.setPrimaryClip(ClipData.newPlainText("Parça Adı", selectedTrack.title))
+                        contextMenuTrack = null
+                        Toast.makeText(context, "Parça adı kopyalandı!", Toast.LENGTH_SHORT).show()
+                    }
+
+                    TrackContextActionRow(
+                        icon = Icons.Default.Share,
+                        label = "Parçayı Paylaş",
+                        tint = AccentPink
+                    ) {
+                        val tr = selectedTrack
+                        contextMenuTrack = null
+                        onShareSingleTrack(tr)
+                    }
+
+                    TrackContextActionRow(
+                        icon = Icons.Default.PlaylistRemove,
+                        label = "Listeden Kaldır",
+                        tint = TextDim
+                    ) {
+                        val tr = selectedTrack
+                        contextMenuTrack = null
+                        onRemoveTrackFromList(tr)
+                    }
+
+                    TrackContextActionRow(
+                        icon = Icons.Default.DeleteForever,
+                        label = "Cihazdan Sil",
+                        tint = Color(0xFFFF453A)
+                    ) {
+                        val tr = selectedTrack
+                        contextMenuTrack = null
+                        confirmDeleteTrack = tr
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+            }
+        }
+
+        // CİHAZDAN SİLME ONAY DİYALOĞU
+        confirmDeleteTrack?.let { target ->
+            AlertDialog(
+                onDismissRequest = { confirmDeleteTrack = null },
+                containerColor = BgCard,
+                title = { Text("Cihazdan Silinsin mi?", color = TextWhite, fontWeight = FontWeight.Bold) },
+                text = {
+                    Text(
+                        "'${target.title}' parçası cihazınızdan kalıcı olarak silinecek.",
                         color = TextDim,
                         fontSize = 13.sp
                     )
                 },
                 confirmButton = {
-                    TextButton(onClick = { isUpdateDialogOpen = false }) {
-                        Text("Tamam", color = AccentOrange, fontWeight = FontWeight.Bold)
+                    Button(
+                        onClick = {
+                            val tr = target
+                            confirmDeleteTrack = null
+                            onDeleteTrackFromDevice(tr)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFF3B30))
+                    ) {
+                        Text("Sil", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmDeleteTrack = null }) {
+                        Text("Vazgeç", color = TextMuted)
                     }
                 }
             )
         }
+
+        // CANLI GÜNCELLEMELERİ DENETLE DİYALOĞU (Windows src/updater.c ile Birebir)
+        if (isUpdateDialogOpen) {
+            LiveUpdateDialog(onDismiss = { isUpdateDialogOpen = false })
+        }
     }
 }
 
-// ==================== ARKADAŞLAR & JAM TAM PANELİ ====================
+@Composable
+private fun TrackContextActionRow(
+    icon: ImageVector,
+    label: String,
+    tint: Color,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = label,
+            color = if (tint == Color(0xFFFF453A)) tint else TextWhite,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+private fun compareSemVer(remoteVer: String, localVer: String): Int {
+    val r = remoteVer.trim().removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
+    val l = localVer.trim().removePrefix("v").split('.').map { it.toIntOrNull() ?: 0 }
+    for (i in 0..2) {
+        val rv = r.getOrElse(i) { 0 }
+        val lv = l.getOrElse(i) { 0 }
+        if (rv != lv) return rv - lv
+    }
+    return 0
+}
+
+@Composable
+fun LiveUpdateDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var checking by remember { mutableStateOf(true) }
+    var hasUpdate by remember { mutableStateOf(false) }
+    var remoteVersion by remember { mutableStateOf(APP_VERSION) }
+    var notes by remember { mutableStateOf("") }
+    var checkError by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            try {
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(6, TimeUnit.SECONDS)
+                    .readTimeout(6, TimeUnit.SECONDS)
+                    .build()
+                val req = Request.Builder()
+                    .url("$VERSION_CHECK_URL?t=${System.currentTimeMillis()}")
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        checkError = true
+                    } else {
+                        val lines = (resp.body?.string() ?: "")
+                            .lines()
+                            .map { it.removePrefix("\uFEFF").trim() }
+                            .filter { it.isNotEmpty() }
+                        if (lines.isNotEmpty()) {
+                            val ver = lines[0]
+                            val changelogLines = lines.drop(1).filterNot {
+                                it.startsWith("http://", ignoreCase = true) ||
+                                it.startsWith("https://", ignoreCase = true)
+                            }
+                            remoteVersion = ver
+                            notes = changelogLines.joinToString("\n")
+                            hasUpdate = compareSemVer(ver, APP_VERSION) > 0
+                        } else {
+                            checkError = true
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                checkError = true
+            } finally {
+                checking = false
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = BgCard,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = AccentOrange)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Güncellemeleri Denetle", color = TextWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            if (checking) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+                    CircularProgressIndicator(modifier = Modifier.size(22.dp), color = AccentOrange, strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("Sunucudan son sürüm kontrol ediliyor...", color = TextDim, fontSize = 13.sp)
+                }
+            } else if (checkError) {
+                Text(
+                    "Güncelleme sunucusuna şu an ulaşılamadı.\nMevcut sürümünüz: v$APP_VERSION",
+                    color = TextDim,
+                    fontSize = 13.sp
+                )
+            } else if (hasUpdate) {
+                Column {
+                    Text(
+                        "Yeni sürüm bulundu: v$remoteVersion (Mevcut: v$APP_VERSION)",
+                        color = AccentOrange,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (notes.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(notes, color = TextDim, fontSize = 12.sp)
+                    }
+                }
+            } else {
+                Column {
+                    Text(
+                        "✓ En güncel sürümü kullanıyorsunuz (v$APP_VERSION).",
+                        color = Color(0xFF34C759),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (notes.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(notes, color = TextDim, fontSize = 12.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (!checking && hasUpdate) {
+                Button(
+                    onClick = {
+                        onDismiss()
+                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(APK_RELEASE_URL)))
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentOrange)
+                ) {
+                    Text("İndir ve Güncelle", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            } else {
+                TextButton(onClick = onDismiss) {
+                    Text("Tamam", color = AccentOrange, fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            if (!checking && hasUpdate) {
+                TextButton(onClick = onDismiss) {
+                    Text("Daha Sonra", color = TextMuted)
+                }
+            }
+        }
+    )
+}
+
+// ==================== ARKADAŞLAR & SINIRSIZ KİŞİLİK JAM PANELİ ====================
 
 @Composable
 fun FriendsPanelScreen(
@@ -898,7 +1911,7 @@ fun FriendsPanelScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onClose) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Geri", tint = TextWhite)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri", tint = TextWhite)
                 }
 
                 Spacer(modifier = Modifier.width(4.dp))
@@ -912,7 +1925,6 @@ fun FriendsPanelScreen(
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                // Sunucu Bağlantı Durumu (Yeşil: Bağlı, Kırmızı: Bağlanıyor)
                 Box(
                     modifier = Modifier
                         .size(8.dp)
@@ -921,12 +1933,13 @@ fun FriendsPanelScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isConnected) "Canlı" else "Bağlanıyor",
+                    text = if (isConnected) "Canlı" else "Bağlan..",
                     color = if (isConnected) Color(0xFF34C759) else Color(0xFFFF3B30),
-                    fontSize = 11.sp
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
                 )
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
                 IconButton(onClick = { friendsManager.requestAllStatuses() }) {
                     Icon(Icons.Default.Refresh, contentDescription = "Yenile", tint = TextDim)
@@ -1049,6 +2062,51 @@ fun FriendsPanelScreen(
                 }
             }
 
+            // Aktif Jam Odası Katılımcı Özeti Kartı
+            if (jamState.isActive || jamState.isInviting) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF1E1428),
+                    border = BorderStroke(1.dp, AccentPink),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = jamState.formatHeadline(),
+                                color = TextWhite,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Listedeki çevrimiçi arkadaşlarına '+ Davet' ile sınırsız kişi ekleyebilirsin.",
+                                color = AccentOrange,
+                                fontSize = 10.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            onClick = { friendsManager.leaveJamRoom() },
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF33151E),
+                            border = BorderStroke(0.5.dp, Color(0xFFFF3B30))
+                        ) {
+                            Text(
+                                text = if (jamState.isInviting && !jamState.isActive) "İptal" else "Ayrıl",
+                                color = Color(0xFFFF453A),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
 
             // SEKMELER
@@ -1107,12 +2165,24 @@ fun FriendsPanelScreen(
                             }
                         }
                     } else {
+                        val roomOpen = jamState.isActive || jamState.isInviting
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(friends, key = { it.tag }) { friend ->
+                                val inRoom = jamState.isFriendInRoom(friend.tag)
                                 FriendRowItem(
                                     friend = friend,
-                                    isInJamWithMe = (jamState.isActive && jamState.partnerTag.equals(friend.tag, ignoreCase = true)),
-                                    onInviteJam = { friendsManager.inviteFriendToJam(friend.tag) },
+                                    isInJamRoom = inRoom,
+                                    isRoomOpen = roomOpen,
+                                    onInviteJam = {
+                                        if (!inRoom) {
+                                            friendsManager.inviteFriendToJam(friend.tag, friend.name)
+                                            Toast.makeText(
+                                                context,
+                                                "🎧 ${friend.name} Jam odasına davet edildi!",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    },
                                     onRemove = { friendsManager.removeFriend(friend.tag) }
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
@@ -1207,7 +2277,8 @@ fun FriendsPanelScreen(
                                         isCheckError = false
                                         addTagInput = ""
                                     } else {
-                                        checkStatusMessage = "Böyle bir kullanıcı yok veya çevrimdışı!"
+                                        checkStatusMessage = res.exceptionOrNull()?.message
+                                            ?: "Böyle bir kullanıcı yok veya şu an çevrimdışı!"
                                         isCheckError = true
                                     }
                                 }
@@ -1232,7 +2303,6 @@ fun FriendsPanelScreen(
                             }
                         }
 
-                        // Canlı Durum Bildirim Kartı
                         if (checkStatusMessage != null) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Surface(
@@ -1319,14 +2389,15 @@ fun FriendsPanelScreen(
 @Composable
 fun FriendRowItem(
     friend: FriendItem,
-    isInJamWithMe: Boolean,
+    isInJamRoom: Boolean,
+    isRoomOpen: Boolean,
     onInviteJam: () -> Unit,
     onRemove: () -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = if (isInJamWithMe) Color(0xFF221326) else BgCard,
-        border = BorderStroke(1.dp, if (isInJamWithMe) AccentPink else BorderDark),
+        color = if (isInJamRoom) Color(0xFF221326) else BgCard,
+        border = BorderStroke(1.dp, if (isInJamRoom) AccentPink else BorderDark),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -1382,16 +2453,20 @@ fun FriendRowItem(
                 )
             }
 
-            if (friend.isOnline) {
+            if (friend.isOnline || isInJamRoom) {
                 Surface(
                     onClick = onInviteJam,
                     shape = RoundedCornerShape(8.dp),
-                    color = if (isInJamWithMe) AccentPink else Color(0xFF2A1C30),
-                    border = BorderStroke(1.dp, AccentPink),
+                    color = if (isInJamRoom) AccentPink else Color(0xFF2A1C30),
+                    border = BorderStroke(1.dp, if (isRoomOpen && !isInJamRoom) AccentOrange else AccentPink),
                     modifier = Modifier.padding(end = 4.dp)
                 ) {
                     Text(
-                        text = if (isInJamWithMe) "Jam'de" else "Jam",
+                        text = when {
+                            isInJamRoom -> "Odada"
+                            isRoomOpen -> "+ Davet"
+                            else -> "Jam"
+                        },
                         color = TextWhite,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -1439,22 +2514,22 @@ fun PendingRequestItem(
     }
 }
 
-// ==================== DİĞER BİLEŞENLER ====================
+// ==================== ÇEKMECE MENÜ & OYNATICI BİLEŞENLERİ ====================
 
 @Composable
 fun DrawerContent(
     trackCount: Int,
-    onScanFolder: () -> Unit,
+    pendingCount: Int,
+    hasCustomFolder: Boolean,
+    onOpenFolderDialog: () -> Unit,
     onOpenDownload: () -> Unit,
     onOpenFriends: () -> Unit,
-    onImportPlaylist: (android.content.Context) -> Unit,
+    onImportPlaylist: () -> Unit,
     onExportPlaylist: () -> Unit,
     onClearList: () -> Unit,
     onCheckUpdates: () -> Unit,
     onClose: () -> Unit
 ) {
-    val context = LocalContext.current
-
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = BgSurface,
@@ -1488,7 +2563,7 @@ fun DrawerContent(
                         letterSpacing = 2.5.sp
                     )
                     Text(
-                        text = "0.5 MB Bellek • Saf Hız • v1.1.0",
+                        text = "Saf Hız • Sınırsız Jam • v$APP_VERSION",
                         fontSize = 11.sp,
                         color = AccentOrange
                     )
@@ -1500,7 +2575,7 @@ fun DrawerContent(
             }
 
             Text(
-                text = "$trackCount yerel parça",
+                text = if (hasCustomFolder) "$trackCount parça (Özel Klasör)" else "$trackCount yerel parça",
                 fontSize = 11.sp,
                 color = TextMuted,
                 modifier = Modifier.padding(start = 2.dp, top = 6.dp, bottom = 14.dp)
@@ -1512,8 +2587,8 @@ fun DrawerContent(
             DrawerMenuItem(
                 icon = Icons.Default.FolderOpen,
                 title = "Müzik Klasörü Seç",
-                subtitle = "Yerel arşivi tara",
-                onClick = onScanFolder
+                subtitle = if (hasCustomFolder) "Özel klasör seçili • Değiştir" else "Belirli klasör seç veya tümünü tara",
+                onClick = onOpenFolderDialog
             )
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -1521,7 +2596,7 @@ fun DrawerContent(
             DrawerMenuItem(
                 icon = Icons.Default.CloudDownload,
                 title = "Müzik Ara ve İndir",
-                subtitle = "YouTube'dan anında indir",
+                subtitle = "YouTube'dan 4 kanallı hızlı indir",
                 isSpecial = true,
                 onClick = onOpenDownload
             )
@@ -1531,8 +2606,9 @@ fun DrawerContent(
             DrawerMenuItem(
                 icon = Icons.Default.Groups,
                 title = "Arkadaşlar ve Jam",
-                subtitle = "Birlikte canlı dinle",
+                subtitle = if (pendingCount > 0) "$pendingCount yeni arkadaşlık isteği bekliyor!" else "Sınırsız kişilik canlı Jam odası",
                 isSpecial = true,
+                badgeCount = pendingCount,
                 onClick = onOpenFriends
             )
 
@@ -1541,8 +2617,8 @@ fun DrawerContent(
             DrawerMenuItem(
                 icon = Icons.Default.FileUpload,
                 title = "Oynatma Listesini İçe Aktar",
-                subtitle = "Paylaşılan listeyi ekle",
-                onClick = { onImportPlaylist(context) }
+                subtitle = ".m3u8 / .aurns aç ve eksikleri indir",
+                onClick = onImportPlaylist
             )
 
             Spacer(modifier = Modifier.height(6.dp))
@@ -1550,7 +2626,7 @@ fun DrawerContent(
             DrawerMenuItem(
                 icon = Icons.Default.FileDownload,
                 title = "Oynatma Listesini Dışa Aktar",
-                subtitle = "Arkadaşlarınla paylaş",
+                subtitle = "Akıllı .m3u8 dosyasını paylaş",
                 onClick = onExportPlaylist
             )
 
@@ -1571,7 +2647,7 @@ fun DrawerContent(
             DrawerMenuItem(
                 icon = Icons.Default.SystemUpdate,
                 title = "Güncellemeleri Denetle",
-                subtitle = "v1.1.0 sürümü",
+                subtitle = "v$APP_VERSION sürümü",
                 onClick = onCheckUpdates
             )
         }
@@ -1584,6 +2660,7 @@ fun DrawerMenuItem(
     title: String,
     subtitle: String,
     isSpecial: Boolean = false,
+    badgeCount: Int = 0,
     onClick: () -> Unit
 ) {
     Surface(
@@ -1624,29 +2701,51 @@ fun DrawerMenuItem(
                 )
                 Text(
                     text = subtitle,
-                    color = TextDim,
-                    fontSize = 10.sp
+                    color = if (badgeCount > 0) AccentOrange else TextDim,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+            }
+
+            if (badgeCount > 0) {
+                Surface(
+                    shape = CircleShape,
+                    color = AccentPink
+                ) {
+                    Text(
+                        text = "$badgeCount",
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TrackRowItem(
     index: Int,
     track: Track,
     isCurrent: Boolean,
     isPlaying: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onOpenMenu: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(54.dp)
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onOpenMenu
+            )
             .background(if (isCurrent) Color(0xFF1B1422) else Color.Transparent)
-            .padding(horizontal = 12.dp),
+            .padding(start = 12.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -1678,13 +2777,12 @@ fun TrackRowItem(
             )
         }
 
-        // Windows ΛURNS ile %100 Birebir Neon Durum Rozeti (ÇALIYOR / DURAKLAT)
         if (isCurrent) {
             Surface(
                 shape = RoundedCornerShape(10.dp),
                 color = Color(0xFF20121E),
                 border = BorderStroke(1.dp, AccentPink.copy(alpha = 0.7f)),
-                modifier = Modifier.padding(end = 8.dp)
+                modifier = Modifier.padding(end = 6.dp)
             ) {
                 Text(
                     text = if (isPlaying) "ÇALIYOR" else "DURAKLAT",
@@ -1701,10 +2799,18 @@ fun TrackRowItem(
             fontSize = 11.sp,
             color = TextMuted
         )
+
+        IconButton(onClick = onOpenMenu, modifier = Modifier.size(30.dp)) {
+            Icon(
+                Icons.Default.MoreVert,
+                contentDescription = "Parça Seçenekleri",
+                tint = TextMuted,
+                modifier = Modifier.size(16.dp)
+            )
+        }
     }
 }
 
-// GPU Katmanı (graphicsLayer) ile Sıfır Compose Recomposition Maliyetli Nabız Animasyonu
 @Composable
 fun AuraPulseDot(isCurrent: Boolean, isPlaying: Boolean) {
     if (isCurrent && isPlaying) {
@@ -1740,7 +2846,7 @@ fun FloatingPlayerDock(
     track: Track,
     isPlaying: Boolean,
     isShuffle: Boolean,
-    isRepeat: Boolean,
+    repeatMode: Int,
     currentPositionFlow: MutableStateFlow<Int>,
     durationFlow: MutableStateFlow<Int>,
     onTogglePlay: () -> Unit,
@@ -1843,9 +2949,9 @@ fun FloatingPlayerDock(
 
                 IconButton(onClick = onToggleRepeat, modifier = Modifier.size(30.dp)) {
                     Icon(
-                        Icons.Default.Repeat,
+                        if (repeatMode == 2) Icons.Default.RepeatOne else Icons.Default.Repeat,
                         contentDescription = "Tekrar",
-                        tint = if (isRepeat) AccentPink else TextMuted,
+                        tint = if (repeatMode > 0) AccentPink else TextMuted,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -1853,7 +2959,6 @@ fun FloatingPlayerDock(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // Yalnızca Slider'ı recompose eden izole bileşen (60 FPS pürüzsüz kaydırma)
             PlayerProgressSlider(
                 currentPositionFlow = currentPositionFlow,
                 durationFlow = durationFlow,
@@ -1871,11 +2976,35 @@ fun PlayerProgressSlider(
 ) {
     val currentPos by currentPositionFlow.collectAsState()
     val duration by durationFlow.collectAsState()
+    var isDragging by remember { mutableStateOf(false) }
+    var dragFraction by remember { mutableFloatStateOf(0f) }
+
+    val activeFraction = if (isDragging) {
+        dragFraction
+    } else if (duration > 0) {
+        (currentPos.toFloat() / duration).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val displayedSec = if (isDragging && duration > 0) {
+        (dragFraction * duration).toInt()
+    } else {
+        currentPos
+    }
 
     Column {
         Slider(
-            value = if (duration > 0) currentPos.toFloat() / duration else 0f,
-            onValueChange = { onSeek((it * duration).toInt()) },
+            value = activeFraction,
+            onValueChange = { frac ->
+                isDragging = true
+                dragFraction = frac.coerceIn(0f, 1f)
+            },
+            onValueChangeFinished = {
+                if (duration > 0) {
+                    onSeek((dragFraction * duration).toInt())
+                }
+                isDragging = false
+            },
             colors = SliderDefaults.colors(
                 thumbColor = AccentOrange,
                 activeTrackColor = AccentPink,
@@ -1889,9 +3018,9 @@ fun PlayerProgressSlider(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "%02d:%02d".format(currentPos / 60, currentPos % 60),
+                text = "%02d:%02d".format(displayedSec / 60, displayedSec % 60),
                 fontSize = 10.sp,
-                color = TextMuted
+                color = if (isDragging) AccentOrange else TextMuted
             )
             Text(
                 text = "%02d:%02d".format(duration / 60, duration % 60),
@@ -1906,15 +3035,22 @@ fun PlayerProgressSlider(
 fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
     LaunchedEffect(dlProgress.isDone) {
         if (dlProgress.isDone) {
-            kotlinx.coroutines.delay(2500)
+            delay(2500)
             onCancel()
         }
     }
     LaunchedEffect(dlProgress.error) {
         if (dlProgress.error != null) {
-            kotlinx.coroutines.delay(3500)
+            delay(3500)
             onCancel()
         }
+    }
+
+    val bannerHeadline = when {
+        dlProgress.error != null -> "HATA: ${dlProgress.error}"
+        dlProgress.headline.isNotBlank() -> dlProgress.headline
+        dlProgress.isDone -> "✓ İNDİRME TAMAMLANDI"
+        else -> "PARÇA İNDİRİLİYOR (MYT HIZI)"
     }
 
     Column(
@@ -1932,7 +3068,7 @@ fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (dlProgress.isDone) "İNDİRME TAMAMLANDI" else if (dlProgress.error != null) "HATA: ${dlProgress.error}" else "PARÇA İNDİRİLİYOR (MYT HIZI)",
+                    text = bannerHeadline,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (dlProgress.isDone) AccentOrange else if (dlProgress.error != null) Color(0xFFFF3B30) else AccentPink
@@ -1971,7 +3107,7 @@ fun DownloadProgressBanner(dlProgress: DownloadProgress, onCancel: () -> Unit) {
         ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(dlProgress.percent / 100f)
+                    .fillMaxWidth((dlProgress.percent / 100f).coerceIn(0f, 1f))
                     .fillMaxHeight()
                     .background(Brush.horizontalGradient(listOf(AccentOrange, AccentPink, AccentPurple)))
             )

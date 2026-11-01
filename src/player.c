@@ -30,11 +30,12 @@ static PFN_MFPCreateMediaPlayer g_pfnMFPCreate = NULL;
 static PlayerCallback *g_pCallback = NULL;
 static volatile LONG g_openGen = 0;
 static volatile LONG g_mediaReady = 0;
-static volatile LONG g_pendingSeekSec = -1;
+static volatile LONG g_pendingSeekMs = -1;
 static volatile int g_isPlaying = 0;
 static volatile int g_isPaused = 0;
 static int g_volume = 80; // 0 - 100
 static volatile int g_durationCache = 0;
+static volatile int g_durationMsCache = 0;
 
 static HRESULT STDMETHODCALLTYPE Cb_QueryInterface(IMFPMediaPlayerCallback *this, REFIID riid, void **ppv) {
     if (IsEqualGUID(riid, &MY_IID_IUnknown) || IsEqualGUID(riid, &MY_IID_IMFPMediaPlayerCallback)) {
@@ -80,19 +81,21 @@ static void STDMETHODCALLTYPE Cb_OnMediaPlayerEvent(IMFPMediaPlayerCallback *thi
             PROPVARIANT var;
             PropVariantInit(&var);
             if (SUCCEEDED(g_pPlayer->lpVtbl->GetDuration(g_pPlayer, &MFP_POSITION_UNIT_100NS, &var))) {
+                g_durationMsCache = (int)(var.hVal.QuadPart / 10000LL);
                 g_durationCache = (int)(var.hVal.QuadPart / 10000000LL);
                 PropVariantClear(&var);
             }
 
-            LONG seekTarget = InterlockedExchange(&g_pendingSeekSec, -1);
-            if (seekTarget >= 0) {
-                if (g_durationCache > 0 && seekTarget > g_durationCache) {
-                    seekTarget = g_durationCache;
+            // Sarki baslamadan ONCE hedef milisaniyeye atomik atla (00:00'dan baslama hatasini 0'a indirir!)
+            LONG seekTargetMs = InterlockedExchange(&g_pendingSeekMs, -1);
+            if (seekTargetMs >= 0) {
+                if (g_durationMsCache > 500 && seekTargetMs > g_durationMsCache - 250) {
+                    seekTargetMs = g_durationMsCache - 250;
                 }
                 PROPVARIANT posVar;
                 PropVariantInit(&posVar);
                 posVar.vt = VT_I8;
-                posVar.hVal.QuadPart = (LONGLONG)seekTarget * 10000000LL;
+                posVar.hVal.QuadPart = (LONGLONG)seekTargetMs * 10000LL;
                 g_pPlayer->lpVtbl->SetPosition(g_pPlayer, &MFP_POSITION_UNIT_100NS, &posVar);
                 PropVariantClear(&posVar);
             }
@@ -142,6 +145,7 @@ void Player_Shutdown(void) {
     g_isPaused = 0;
     InterlockedExchange(&g_mediaReady, 0);
     g_durationCache = 0;
+    g_durationMsCache = 0;
     if (g_pCallback) {
         g_pCallback->cb.lpVtbl->Release((IMFPMediaPlayerCallback*)g_pCallback);
         g_pCallback = NULL;
@@ -153,7 +157,7 @@ void Player_Shutdown(void) {
     }
 }
 
-int Player_OpenFile(const wchar_t *path) {
+int Player_OpenFileAtMs(const wchar_t *path, int startMs, BOOL startPaused) {
     if (!path || !path[0]) return 0;
 
     // Motor henüz oluşturulmadıysa mfplay.dll'i ilk şarkı açılışında yükle (açılışta sıfır DLL/RAM yükü!)
@@ -172,21 +176,28 @@ int Player_OpenFile(const wchar_t *path) {
         g_pPlayer->lpVtbl->SetVolume(g_pPlayer, (float)g_volume / 100.0f);
     }
 
+    if (startMs < 0) startMs = 0;
     LONG gen = InterlockedIncrement(&g_openGen);
     InterlockedExchange(&g_mediaReady, 0);
-    InterlockedExchange(&g_pendingSeekSec, -1);
+    InterlockedExchange(&g_pendingSeekMs, (startMs > 0) ? (LONG)startMs : -1);
     g_durationCache = 0;
+    g_durationMsCache = 0;
     g_isPlaying = 1;
-    g_isPaused = 0;
+    g_isPaused = startPaused ? 1 : 0;
 
     // Asenkron yükleme: Arayüzü (UI Thread) 0.0 ms bile dondurmaz!
     HRESULT hr = g_pPlayer->lpVtbl->CreateMediaItemFromURL(g_pPlayer, path, FALSE, (DWORD_PTR)gen, NULL);
     if (FAILED(hr)) {
         g_isPlaying = 0;
+        g_isPaused = 0;
         return 0;
     }
 
     return 1;
+}
+
+int Player_OpenFile(const wchar_t *path) {
+    return Player_OpenFileAtMs(path, 0, FALSE);
 }
 
 void Player_Play(void) {
@@ -216,62 +227,78 @@ void Player_Pause(void) {
 void Player_Stop(void) {
     InterlockedIncrement(&g_openGen);
     InterlockedExchange(&g_mediaReady, 0);
-    InterlockedExchange(&g_pendingSeekSec, -1);
+    InterlockedExchange(&g_pendingSeekMs, -1);
     if (g_pPlayer) {
         g_pPlayer->lpVtbl->Stop(g_pPlayer);
     }
     g_isPlaying = 0;
     g_isPaused = 0;
     g_durationCache = 0;
+    g_durationMsCache = 0;
 }
 
 int Player_IsPlaying(void) {
     return g_isPlaying && !g_isPaused;
 }
 
-int Player_GetDuration(void) {
+int Player_GetDurationMs(void) {
     if (!g_pPlayer || !g_mediaReady) return 0;
-    if (g_durationCache > 0) return g_durationCache;
+    if (g_durationMsCache > 0) return g_durationMsCache;
 
     PROPVARIANT var;
     PropVariantInit(&var);
     if (SUCCEEDED(g_pPlayer->lpVtbl->GetDuration(g_pPlayer, &MFP_POSITION_UNIT_100NS, &var))) {
+        g_durationMsCache = (int)(var.hVal.QuadPart / 10000LL);
         g_durationCache = (int)(var.hVal.QuadPart / 10000000LL);
         PropVariantClear(&var);
-        return g_durationCache;
+        return g_durationMsCache;
     }
     return 0;
 }
 
-int Player_GetPosition(void) {
+int Player_GetDuration(void) {
+    int ms = Player_GetDurationMs();
+    return (ms > 0) ? (ms / 1000) : g_durationCache;
+}
+
+int Player_GetPositionMs(void) {
     if (!g_pPlayer || !g_mediaReady) {
-        LONG pending = g_pendingSeekSec;
+        LONG pending = g_pendingSeekMs;
         return (pending >= 0) ? (int)pending : 0;
     }
     PROPVARIANT var;
     PropVariantInit(&var);
-    int posSec = 0;
+    int posMs = 0;
     if (SUCCEEDED(g_pPlayer->lpVtbl->GetPosition(g_pPlayer, &MFP_POSITION_UNIT_100NS, &var))) {
-        posSec = (int)(var.hVal.QuadPart / 10000000LL);
+        posMs = (int)(var.hVal.QuadPart / 10000LL);
         PropVariantClear(&var);
     }
-    return posSec;
+    return posMs;
 }
 
-void Player_SetPosition(int seconds) {
-    if (!g_pPlayer || seconds < 0) return;
+int Player_GetPosition(void) {
+    return Player_GetPositionMs() / 1000;
+}
+
+void Player_SetPositionMs(int ms) {
+    if (!g_pPlayer || ms < 0) return;
     if (!g_mediaReady) {
-        InterlockedExchange(&g_pendingSeekSec, (LONG)seconds);
+        InterlockedExchange(&g_pendingSeekMs, (LONG)ms);
         return;
     }
-    int dur = Player_GetDuration();
-    if (dur > 0 && seconds > dur) seconds = dur;
+    int durMs = Player_GetDurationMs();
+    if (durMs > 500 && ms > durMs - 200) ms = durMs - 200;
     PROPVARIANT var;
     PropVariantInit(&var);
     var.vt = VT_I8;
-    var.hVal.QuadPart = (LONGLONG)seconds * 10000000LL;
+    var.hVal.QuadPart = (LONGLONG)ms * 10000LL;
     g_pPlayer->lpVtbl->SetPosition(g_pPlayer, &MFP_POSITION_UNIT_100NS, &var);
     PropVariantClear(&var);
+}
+
+void Player_SetPosition(int seconds) {
+    if (seconds < 0) return;
+    Player_SetPositionMs(seconds * 1000);
 }
 
 void Player_SetVolume(int volumePercent) {

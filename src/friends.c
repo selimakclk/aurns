@@ -307,6 +307,11 @@ void Friends_SetMyName(const wchar_t *newName) {
     clean[cIdx] = L'\0';
     if (!clean[0]) return;
 
+    char myOldKey[64] = {0};
+    if (g_myTag[0]) {
+        Network_TagToTopicKeyW(g_myTag, myOldKey, sizeof(myOldKey));
+    }
+
     wcsncpy(g_myName, clean, 63);
     g_myName[63] = L'\0';
 
@@ -317,7 +322,9 @@ void Friends_SetMyName(const wchar_t *newName) {
         hashPart = wcschr(g_myTag, L'#');
     }
     if (hashPart) {
-        _snwprintf(g_myTag, 31, L"%s%s", clean, hashPart);
+        wchar_t suffix[16] = {0};
+        wcsncpy(suffix, hashPart, 15);
+        _snwprintf(g_myTag, 31, L"%s%s", clean, suffix);
     } else {
         _snwprintf(g_myTag, 31, L"%s#1234", clean);
     }
@@ -327,6 +334,11 @@ void Friends_SetMyName(const wchar_t *newName) {
 
     char myNewKey[64] = {0};
     Network_TagToTopicKeyW(g_myTag, myNewKey, sizeof(myNewKey));
+    if (myOldKey[0] && _stricmp(myOldKey, myNewKey) != 0) {
+        char oldInbox[160];
+        snprintf(oldInbox, sizeof(oldInbox), "seloplayer/u/%s", myOldKey);
+        Network_Unsubscribe(oldInbox);
+    }
     char inbox[160];
     snprintf(inbox, sizeof(inbox), "seloplayer/u/%s", myNewKey);
     Network_Subscribe(inbox);
@@ -335,14 +347,12 @@ void Friends_SetMyName(const wchar_t *newName) {
 
 static wchar_t g_lastProbedTag[32] = {0};
 static BOOL    g_lastProbedFound = FALSE;
-static DWORD   g_lastProbedTick = 0;
 
 void Friends_ProbeUser(const wchar_t *targetTag) {
     if (!targetTag || !targetTag[0]) return;
     wcsncpy(g_lastProbedTag, targetTag, 31);
     g_lastProbedTag[31] = L'\0';
     g_lastProbedFound = FALSE;
-    g_lastProbedTick = GetTickCount();
 
     SendPingToTag(targetTag);
 }
@@ -713,8 +723,6 @@ void Friends_HandleNetworkMessage(const char *topic, const char *payload) {
         if (g_lastProbedTag[0] && _wcsicmp(g_lastProbedTag, wTag) == 0) {
             g_lastProbedFound = TRUE;
         }
-        MultiByteToWideChar(CP_UTF8, 0, tag, -1, wTag, 31);
-        MultiByteToWideChar(CP_UTF8, 0, name, -1, wName, 63);
 
         int idx = FindFriendIndexByTagW(wTag);
         if (idx >= 0) {

@@ -15,11 +15,13 @@ typedef enum {
 typedef struct {
     NetEventType type;
     char topic[128];
-    char payload[512];
+    char payload[1024];
 } NetEvent;
 
 BOOL Network_Init(HWND hWnd, const char *clientTag);
+BOOL Network_IsConnected(void);
 BOOL Network_Subscribe(const char *topic);
+BOOL Network_Unsubscribe(const char *topic);
 BOOL Network_Publish(const char *topic, const char *payload);
 void Network_Close(void);
 

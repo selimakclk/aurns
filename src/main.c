@@ -67,8 +67,10 @@
 #define IDC_MY_NAME_EDIT        1025
 
 #define IDM_CTX_PLAY            2001
-#define IDM_CTX_OPEN_FOLDER     2002
-#define IDM_CTX_REMOVE          2003
+#define IDM_CTX_COPY_TITLE      2002
+#define IDM_CTX_OPEN_FOLDER     2003
+#define IDM_CTX_REMOVE          2004
+#define IDM_CTX_DELETE_DISK     2005
 
 #define WM_APP_POST_INIT        (WM_APP + 440)
 #define WM_APP_JAM_AUTODL_DONE  (WM_APP + 450)
@@ -237,9 +239,15 @@ static DWORD       g_copiedTagTick = 0;
 static DWORD       g_lastFriendsRefreshTick = 0;
 static BOOL        g_isSyncingFromRemote = FALSE;
 
-// Jam Otomatik Şarkı İndirme Durumu
-static volatile LONG g_jamAutoDlBusy = 0;
-static volatile int  g_jamAutoDlPct  = 0;
+// Jam Otomatik Şarkı İndirme ve Milisaniye Yakalama Durumu
+static volatile LONG g_jamAutoDlBusy   = 0;
+static volatile LONG g_jamAutoDlCancel = 0;
+static volatile int  g_jamAutoDlPct    = 0;
+static wchar_t       g_jamWantTitle[256] = {0};
+static wchar_t       g_jamWantYtId[16]   = {0};
+static int           g_jamWantBaseMs     = 0;
+static DWORD         g_jamWantBaseTick   = 0;
+static BOOL          g_jamWantPlaying    = TRUE;
 
 // Evrensel İndirme Bildirim & İlerleme Durumu (Tekil + Paylaşılan Oynatma Listesi + Güncelleme)
 static DlBannerMode  g_dlMode = DL_BANNER_NONE;
@@ -1117,51 +1125,68 @@ static void LoadTrackThumbnail(const wchar_t *filePath) {
     }
 }
 
-static void BroadcastCurrentJamTrack(int posSec) {
-    if (!Jam_IsActive()) return;
+static void SendCurrentJamTrackToPeer(const wchar_t *targetTag) {
+    if (!Jam_IsActive() || !targetTag || !targetTag[0]) return;
     if (g_currentTrack >= 0 && g_currentTrack < Playlist_Count()) {
         const PlaylistItem *it = Playlist_Get(g_currentTrack);
         if (it) {
             wchar_t ytId[16] = {0};
             Playlist_ExtractYouTubeId(it->filePath, ytId, 16);
-            Jam_BroadcastState(Player_IsPlaying(), it->title, ytId, posSec);
+            Jam_SendStateToPeer(targetTag, Player_IsPlaying(), it->title, ytId, Player_GetPositionMs());
         }
     }
 }
 
-static void PlayTrack(int index) {
+static void PlayTrackAtMs(int index, int startMs, BOOL startPaused, BOOL fromRemote) {
     if (index < 0 || index >= Playlist_Count()) return;
     const PlaylistItem *item = Playlist_Get(index);
     if (!item) return;
 
+    BOOL prevRemote = g_isSyncingFromRemote;
+    if (fromRemote) g_isSyncingFromRemote = TRUE;
+
     g_currentTrack = index;
     g_selectedTrack = index;
     LoadTrackThumbnail(item->filePath);
-    Player_OpenFile(item->filePath);
+    Player_OpenFileAtMs(item->filePath, startMs < 0 ? 0 : startMs, startPaused);
     SyncLocalTrackToFriends();
 
     if (Jam_IsActive() && !g_isSyncingFromRemote && item->title[0] != 0) {
+        g_jamWantTitle[0] = L'\0';
+        InterlockedExchange(&g_jamAutoDlCancel, 1);
         wchar_t ytId[16] = {0};
         Playlist_ExtractYouTubeId(item->filePath, ytId, 16);
-        Jam_SetSyncStatus(L"✓ Canlı senkronize", FALSE, NULL);
-        Jam_BroadcastState(TRUE, item->title, ytId, 0);
+        Jam_SetSyncStatus(L"✓ Canlı milisaniye senkronize", FALSE, NULL);
+        Jam_BroadcastState(!startPaused, item->title, ytId, startMs < 0 ? 0 : startMs);
     }
+
+    g_isSyncingFromRemote = prevRemote;
     if (g_hWnd) {
         InvalidateRect(g_hWnd, NULL, FALSE);
         UpdateTimerSchedule(g_hWnd);
     }
 }
 
+static void PlayTrack(int index) {
+    PlayTrackAtMs(index, 0, FALSE, g_isSyncingFromRemote);
+}
+
 // =============================================================================
-// JAM OTOMATİK EKSİK ŞARKI İNDİRİCİ (ARKA PLAN YT-DLP ENTEGRASYONU)
+// JAM OTOMATİK EKSİK ŞARKI İNDİRİCİ (ARKA PLAN YT-DLP + MİLİSANİYE YAKALAMA)
 // =============================================================================
 typedef struct {
     wchar_t title[256];
     wchar_t ytId[16];
     wchar_t folder[MAX_PATH];
-    int     remoteStartPos;
-    DWORD   remoteStartTick;
 } JamAutoDlTask;
+
+static int GetWantedJamLivePosMs(void) {
+    int pos = g_jamWantBaseMs;
+    if (g_jamWantPlaying && g_jamWantBaseTick != 0) {
+        pos += (int)(GetTickCount() - g_jamWantBaseTick) + 90;
+    }
+    return (pos < 0) ? 0 : pos;
+}
 
 static void EnsureDefaultMusicFolder(wchar_t *outFolder, int maxLen) {
     if (g_cfg.lastFolder[0] && GetFileAttributesW(g_cfg.lastFolder) != INVALID_FILE_ATTRIBUTES) {
@@ -1197,7 +1222,10 @@ static DWORD WINAPI JamAutoDownloadThread(LPVOID param) {
     }
     targetSpec[319] = L'\0';
 
-    BOOL success = Search_RunYtDlpDownload(targetSpec, task->folder, NULL, OnJamAutoDlProgress, NULL);
+    BOOL success = Search_RunYtDlpDownload(targetSpec, task->folder, &g_jamAutoDlCancel, OnJamAutoDlProgress, NULL);
+    if (InterlockedCompareExchange(&g_jamAutoDlCancel, 0, 0) != 0) {
+        success = FALSE;
+    }
 
     if (g_hWnd && IsWindow(g_hWnd)) {
         PostMessageW(g_hWnd, WM_APP_JAM_AUTODL_DONE, (WPARAM)success, (LPARAM)task);
@@ -1208,27 +1236,27 @@ static DWORD WINAPI JamAutoDownloadThread(LPVOID param) {
     return 0;
 }
 
-static void StartJamAutoDownload(const wchar_t *trackTitle, const wchar_t *ytId, int remoteStartPos) {
-    if (!trackTitle || !trackTitle[0]) return;
+static void LaunchWantedJamDownloadIfIdle(void) {
+    if (!g_jamWantTitle[0] && !g_jamWantYtId[0]) return;
     if (InterlockedCompareExchange(&g_jamAutoDlBusy, 1, 0) != 0) {
         return;
     }
 
+    InterlockedExchange(&g_jamAutoDlCancel, 0);
     JamAutoDlTask *task = (JamAutoDlTask*)calloc(1, sizeof(JamAutoDlTask));
     if (!task) {
         InterlockedExchange(&g_jamAutoDlBusy, 0);
         return;
     }
-    wcsncpy(task->title, trackTitle, 255);
-    if (ytId) wcsncpy(task->ytId, ytId, 15);
-    task->remoteStartPos = remoteStartPos;
-    task->remoteStartTick = GetTickCount();
+    wcsncpy(task->title, g_jamWantTitle, 255);
+    wcsncpy(task->ytId, g_jamWantYtId, 15);
     EnsureDefaultMusicFolder(task->folder, MAX_PATH);
 
     g_jamAutoDlPct = 0;
 
     wchar_t statusMsg[128];
-    _snwprintf(statusMsg, 127, L"⚡ \"%s\" sende yok • İndiriliyor (%%0)...", trackTitle);
+    _snwprintf(statusMsg, 127, L"⚡ \"%s\" sende yok • İndiriliyor (%%0)...",
+               g_jamWantTitle[0] ? g_jamWantTitle : g_jamWantYtId);
     statusMsg[127] = L'\0';
     Jam_SetSyncStatus(statusMsg, TRUE, NULL);
     if (g_hWnd) StartAnimLoop(g_hWnd);
@@ -1240,6 +1268,39 @@ static void StartJamAutoDownload(const wchar_t *trackTitle, const wchar_t *ytId,
         free(task);
         InterlockedExchange(&g_jamAutoDlBusy, 0);
     }
+}
+
+static void StartJamAutoDownload(const wchar_t *trackTitle, const wchar_t *ytId, int remotePosMs, DWORD recvTick, BOOL remotePlaying) {
+    if ((!trackTitle || !trackTitle[0]) && (!ytId || !ytId[0])) return;
+
+    BOOL sameWanted = FALSE;
+    if (ytId && ytId[0] && g_jamWantYtId[0] && _wcsicmp(ytId, g_jamWantYtId) == 0) {
+        sameWanted = TRUE;
+    } else if (trackTitle && trackTitle[0] && g_jamWantTitle[0] && _wcsicmp(trackTitle, g_jamWantTitle) == 0) {
+        sameWanted = TRUE;
+    }
+
+    g_jamWantBaseMs   = (remotePosMs < 0) ? 0 : remotePosMs;
+    g_jamWantBaseTick = recvTick ? recvTick : GetTickCount();
+    g_jamWantPlaying  = remotePlaying;
+
+    if (sameWanted && InterlockedCompareExchange(&g_jamAutoDlBusy, 0, 0) != 0) {
+        // Zaten bu sarki indiriliyor; yalnizca hedef canli milisaniyeyi guncelledik!
+        return;
+    }
+
+    wcsncpy(g_jamWantTitle, trackTitle ? trackTitle : L"", 255);
+    g_jamWantTitle[255] = L'\0';
+    wcsncpy(g_jamWantYtId, ytId ? ytId : L"", 15);
+    g_jamWantYtId[15] = L'\0';
+
+    if (InterlockedCompareExchange(&g_jamAutoDlBusy, 0, 0) != 0) {
+        // Onceki sarki indirilirken odada baska sarkiya gecildi -> oncekini iptal et, biter bitmez yenisi baslasin!
+        InterlockedExchange(&g_jamAutoDlCancel, 1);
+        return;
+    }
+
+    LaunchWantedJamDownloadIfIdle();
 }
 
 // =============================================================================
@@ -1407,17 +1468,40 @@ static void ApplyRemoteJamSync(const JamRemoteSync *rs) {
 
     g_isSyncingFromRemote = TRUE;
 
+    DWORD nowTick = GetTickCount();
+    int elapsedMs = (rs->recvTick != 0 && nowTick >= rs->recvTick) ? (int)(nowTick - rs->recvTick) : 0;
+    if (elapsedMs > 5000) elapsedMs = 0;
+
     if (rs->posOnly) {
-        if (rs->ytId[0] == L'S') {
-            if (rs->posSec >= 0) Player_SetPosition(rs->posSec);
-        } else if (!rs->isPlaying) {
+        // Sarki indirilirken karsi taraf duraklatti/devam etti veya ileri sardiysa hedef milisaniyeyi canli guncelle!
+        if (InterlockedCompareExchange(&g_jamAutoDlBusy, 0, 0) != 0 && (g_jamWantTitle[0] || g_jamWantYtId[0])) {
+            g_jamWantBaseMs   = rs->posMs;
+            g_jamWantBaseTick = rs->recvTick ? rs->recvTick : nowTick;
+            if (rs->playFlag == 0) g_jamWantPlaying = FALSE;
+            else if (rs->playFlag == 1) g_jamWantPlaying = TRUE;
+            g_isSyncingFromRemote = FALSE;
+            return;
+        }
+
+        // Hic sarki yuklu degilse kendi kendini iyilestir: karsi taraftan tam JAM_STATE iste!
+        if (g_currentTrack < 0) {
+            Jam_RequestPartnerStateNow();
+            g_isSyncingFromRemote = FALSE;
+            return;
+        }
+
+        if (rs->playFlag < 0) {
+            int targetMs = rs->posMs + (Player_IsPlaying() ? (elapsedMs + 50) : 0);
+            Player_SetPositionMs(targetMs);
+        } else if (rs->playFlag == 0) {
             if (Player_IsPlaying()) Player_Pause();
-            if (rs->posSec >= 0) Player_SetPosition(rs->posSec);
+            Player_SetPositionMs(rs->posMs);
             Jam_SetSyncStatus(L"⏸ Ortak duraklatıldı", FALSE, NULL);
         } else {
-            if (rs->posSec >= 0) Player_SetPosition(rs->posSec);
+            int targetMs = rs->posMs + elapsedMs + 50;
+            Player_SetPositionMs(targetMs);
             if (!Player_IsPlaying()) Player_Play();
-            Jam_SetSyncStatus(L"✓ Canlı senkronize", FALSE, NULL);
+            Jam_SetSyncStatus(L"✓ Canlı milisaniye senkronize", FALSE, NULL);
         }
         SyncLocalTrackToFriends();
         g_isSyncingFromRemote = FALSE;
@@ -1429,17 +1513,20 @@ static void ApplyRemoteJamSync(const JamRemoteSync *rs) {
         return;
     }
 
+    int liveMs = rs->posMs + (rs->isPlaying ? (elapsedMs + 60) : 0);
+
     if (g_currentTrack >= 0 && Playlist_IsSameTrack(g_currentTrack, rs->trackTitle, rs->ytId)) {
-        int curPos = Player_GetPosition();
-        if (rs->posSec >= 0 && abs(curPos - rs->posSec) > 2) {
-            Player_SetPosition(rs->posSec);
+        int curMs = Player_GetPositionMs();
+        int driftLimitMs = rs->isPlaying ? 650 : 250;
+        if (abs(curMs - liveMs) > driftLimitMs) {
+            Player_SetPositionMs(liveMs);
         }
         if (rs->isPlaying && !Player_IsPlaying()) {
             Player_Play();
         } else if (!rs->isPlaying && Player_IsPlaying()) {
             Player_Pause();
         }
-        Jam_SetSyncStatus(rs->isPlaying ? L"✓ Canlı senkronize" : L"⏸ Ortak duraklatıldı", FALSE, NULL);
+        Jam_SetSyncStatus(rs->isPlaying ? L"✓ Canlı milisaniye senkronize" : L"⏸ Ortak duraklatıldı", FALSE, NULL);
         SyncLocalTrackToFriends();
         g_isSyncingFromRemote = FALSE;
         return;
@@ -1447,17 +1534,19 @@ static void ApplyRemoteJamSync(const JamRemoteSync *rs) {
 
     int found = Playlist_FindBestMatch(rs->trackTitle, rs->ytId);
     if (found >= 0) {
-        PlayTrack(found);
-        if (rs->posSec > 0) Player_SetPosition(rs->posSec);
-        if (!rs->isPlaying) Player_Pause();
+        g_jamWantTitle[0] = L'\0';
+        g_jamWantYtId[0]  = L'\0';
+        InterlockedExchange(&g_jamAutoDlCancel, 1);
+
+        PlayTrackAtMs(found, liveMs, !rs->isPlaying, TRUE);
         ScrollTrackIntoView(found);
-        Jam_SetSyncStatus(rs->isPlaying ? L"✓ Canlı senkronize" : L"⏸ Ortak duraklatıldı", FALSE, NULL);
+        Jam_SetSyncStatus(rs->isPlaying ? L"✓ Canlı milisaniye senkronize" : L"⏸ Ortak duraklatıldı", FALSE, NULL);
         SyncLocalTrackToFriends();
     } else {
         Player_Stop();
         g_currentTrack = -1;
         SyncLocalTrackToFriends();
-        StartJamAutoDownload(rs->trackTitle, rs->ytId, rs->posSec);
+        StartJamAutoDownload(rs->trackTitle, rs->ytId, rs->posMs, rs->recvTick, rs->isPlaying);
     }
 
     g_isSyncingFromRemote = FALSE;
@@ -1537,7 +1626,7 @@ static void ImportPlaylistDialog(void) {
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hWnd;
     ofn.lpstrTitle = L"Oynatma Listesini İçe Aktar";
-    ofn.lpstrFilter = L"Oynatma Listesi (*.m3u8;*.m3u)\0*.m3u8;*.m3u\0Tüm Dosyalar (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Oynatma Listesi (*.m3u8;*.m3u;*.aurns)\0*.m3u8;*.m3u;*.aurns\0Tüm Dosyalar (*.*)\0*.*\0";
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
@@ -1552,13 +1641,13 @@ static void ExportPlaylistDialog(void) {
         MessageBoxW(g_hWnd, L"Dışa aktarılacak oynatma listesinde henüz şarkı bulunmuyor.", L"Oynatma Listesini Dışa Aktar", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    wchar_t szFile[MAX_PATH] = L"oynatma_listem.m3u8";
+    wchar_t szFile[MAX_PATH] = L"Aurns_Listem.m3u8";
     OPENFILENAMEW ofn;
     memset(&ofn, 0, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = g_hWnd;
     ofn.lpstrTitle = L"Oynatma Listesini Dışa Aktar";
-    ofn.lpstrFilter = L"Paylaşılabilir Oynatma Listesi (*.m3u8)\0*.m3u8\0Standart Oynatma Listesi (*.m3u)\0*.m3u\0";
+    ofn.lpstrFilter = L"Paylaşılabilir Aurns Listesi (*.m3u8)\0*.m3u8\0Aurns Paket Listesi (*.aurns)\0*.aurns\0Standart Oynatma Listesi (*.m3u)\0*.m3u\0";
     ofn.lpstrFile = szFile;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_OVERWRITEPROMPT;
@@ -1853,7 +1942,14 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
         RECT rcFTxt = { frLeft + S(34), searchY, frRight - S(10), searchY + searchH };
         SelectObject(hdc, g_hFontSmallBold);
         SetTextColor(hdc, fActive ? COLOR_ACCENT_PINK : COLOR_TEXT_WHITE);
-        DrawUiText(hdc, (jamState == JAM_STATE_ACTIVE) ? L"Jam Aktif" : L"Arkadaşlar", &rcFTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        wchar_t frBtnLbl[32];
+        if (jamState == JAM_STATE_ACTIVE) {
+            _snwprintf(frBtnLbl, 31, L"Jam (%d)", Jam_GetMemberCount() + 1);
+            frBtnLbl[31] = L'\0';
+        } else {
+            wcscpy(frBtnLbl, L"Arkadaşlar");
+        }
+        DrawUiText(hdc, frBtnLbl, &rcFTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         if (Friends_GetPendingCount() > 0) {
             DrawSmoothCircle((float)(rcHeaderFriends.right - S(8)), (float)(rcHeaderFriends.top + S(7)), (float)S(4), COLOR_ACCENT_ORANGE, 255);
@@ -1935,15 +2031,8 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
             textRightLimit = rcJamMissingBtn.left - S(8);
         }
 
-        wchar_t partnerName[64] = {0};
-        Jam_GetPartnerName(partnerName, 64);
-        wchar_t jamHeadline[160];
-        if (isInviting) {
-            _snwprintf(jamHeadline, 159, L"JAM DAVETİ  •  %s bekleniyor", partnerName[0] ? partnerName : L"Arkadaşın");
-        } else {
-            _snwprintf(jamHeadline, 159, L"CANLI JAM  •  %s ile birlikte dinliyorsun", partnerName[0] ? partnerName : L"Arkadaşın");
-        }
-        jamHeadline[159] = L'\0';
+        wchar_t jamHeadline[160] = {0};
+        Jam_FormatBannerHeadline(jamHeadline, 160);
 
         wchar_t syncSub[128] = {0};
         Jam_GetSyncStatus(syncSub, 128);
@@ -2555,10 +2644,20 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
             rcFriendsRefresh = (RECT){ offX + sbW - S(42), headerH + S(10), offX + sbW - S(12), headerH + S(40) };
             DrawIconCircleBtn(hdc, &rcFriendsRefresh, ZONE_FRIENDS_REFRESH, L"\uE72C", 0, FALSE);
 
-            RECT rcFHead = { offX + S(46), headerH + S(10), offX + sbW - S(46), headerH + S(40) };
-            SelectObject(hdc, g_hFontTitle);
+            BOOL netLive = Network_IsConnected();
+            RECT rcNetPill = { offX + sbW - S(106), headerH + S(15), offX + sbW - S(46), headerH + S(35) };
+            DrawSmoothRoundRect(&rcNetPill, S(10), RGB(22, 22, 24), 255, COLOR_BORDER, 140);
+            DrawSmoothCircle((float)(rcNetPill.left + S(10)), (float)(headerH + S(25)), SF(3.2f),
+                             netLive ? RGB(68, 228, 130) : COLOR_ACCENT_ORANGE, 255);
+            RECT rcNetTxt = { rcNetPill.left + S(17), rcNetPill.top, rcNetPill.right - S(4), rcNetPill.bottom };
+            SelectObject(hdc, g_hFontMicro);
+            SetTextColor(hdc, netLive ? RGB(68, 228, 130) : COLOR_ACCENT_ORANGE);
+            DrawUiText(hdc, netLive ? L"Canlı" : L"Bağlan..", &rcNetTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            RECT rcFHead = { offX + S(44), headerH + S(10), rcNetPill.left - S(4), headerH + S(40) };
+            SelectObject(hdc, g_hFontBold);
             SetTextColor(hdc, COLOR_TEXT_WHITE);
-            DrawUiText(hdc, L"Arkadaşlar & Jam", &rcFHead, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawUiText(hdc, L"Arkadaşlar & Jam", &rcFHead, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             RECT rcMyCard = { offX + S(12), headerH + S(46), offX + sbW - S(12), headerH + S(98) };
             DrawSmoothRoundRect(&rcMyCard, S(12), COLOR_CARD_SURF, 255, COLOR_BORDER, 160);
@@ -2676,9 +2775,6 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
                     SetTextColor(hdc, COLOR_TEXT_MUTED);
                     DrawUiText(hdc, L"Henüz ekli arkadaşın yok.\n\n'+ Ekle' sekmesinden arkadaşının etiketini girerek davet gönderebilirsin.", &rcEmptyF, DT_CENTER | DT_TOP | DT_WORDBREAK);
                 } else {
-                    wchar_t jamPartner[32] = {0};
-                    Jam_GetPartnerTag(jamPartner, 32);
-
                     for (int i = 0; i < fCount; i++) {
                         int cardY = contentTop + i * S(60);
                         if (cardY + S(54) > h - S(8)) break;
@@ -2686,7 +2782,7 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
                         const FriendItem *fi = Friends_GetFriend(i);
                         if (!fi) continue;
 
-                        BOOL inJamWithFriend = (jamState != JAM_STATE_NONE && _wcsicmp(jamPartner, fi->tag) == 0);
+                        BOOL inJamWithFriend = Jam_IsFriendInJam(fi->tag);
                         RECT rcFC = { offX + S(12), cardY, offX + sbW - S(12), cardY + S(54) };
                         DrawSmoothRoundRect(&rcFC, S(11),
                                             inJamWithFriend ? RGB(28, 16, 32) : COLOR_CARD_SURF, 255,
@@ -2711,12 +2807,16 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
                         SetTextColor(hdc, COLOR_TEXT_DIM);
                         DrawUiText(hdc, L"\uE711", &rcFriendRemoveBtns[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-                        rcFriendActionBtns[i] = (RECT){ rcFC.right - S(78), cardY + S(13), rcFC.right - S(30), cardY + S(41) };
-                        COLORREF actBg = inJamWithFriend ? RGB(56, 18, 28) : (fi->isOnline ? COLOR_ACCENT_ORANGE : RGB(24, 24, 24));
-                        DrawSmoothRoundRect(&rcFriendActionBtns[i], S(8), actBg, 255, 0, 0);
+                        rcFriendActionBtns[i] = (RECT){ rcFC.right - S(84), cardY + S(13), rcFC.right - S(30), cardY + S(41) };
+                        COLORREF actBg = inJamWithFriend ? RGB(42, 20, 44) : (fi->isOnline ? COLOR_ACCENT_ORANGE : RGB(24, 24, 24));
+                        DrawSmoothRoundRect(&rcFriendActionBtns[i], S(8), actBg, 255,
+                                            inJamWithFriend ? COLOR_ACCENT_PINK : 0, inJamWithFriend ? 170 : 0);
                         SelectObject(hdc, g_hFontMicro);
-                        SetTextColor(hdc, inJamWithFriend ? RGB(255, 165, 165) : (fi->isOnline ? RGB(5, 5, 5) : COLOR_TEXT_DIM));
-                        DrawUiText(hdc, inJamWithFriend ? L"Ayrıl" : L"Jam", &rcFriendActionBtns[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                        SetTextColor(hdc, inJamWithFriend ? COLOR_ACCENT_PINK : (fi->isOnline ? RGB(5, 5, 5) : COLOR_TEXT_DIM));
+                        const wchar_t *jamBtnTxt = inJamWithFriend
+                            ? ((jamState == JAM_STATE_INVITING) ? L"Bekliyor" : L"Odada")
+                            : ((jamState != JAM_STATE_NONE) ? L"+ Davet" : L"Jam");
+                        DrawUiText(hdc, jamBtnTxt, &rcFriendActionBtns[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                         RECT rcFN = { rcFC.left + S(46), cardY + S(8),  rcFriendActionBtns[i].left - S(6), cardY + S(27) };
                         RECT rcFS = { rcFC.left + S(46), cardY + S(26), rcFriendActionBtns[i].left - S(6), cardY + S(46) };
@@ -3131,7 +3231,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     DWORD attr = GetFileAttributesW(argv[i]);
                     if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
                         const wchar_t *ext = PathFindExtensionW(argv[i]);
-                        if (_wcsicmp(ext, L".m3u") == 0 || _wcsicmp(ext, L".m3u8") == 0) {
+                        if (_wcsicmp(ext, L".m3u") == 0 || _wcsicmp(ext, L".m3u8") == 0 || _wcsicmp(ext, L".aurns") == 0) {
                             HandleSmartPlaylistImport(argv[i]);
                         } else {
                             Playlist_Add(argv[i]);
@@ -3182,6 +3282,13 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 PlayTrack(g_selectedTrack);
                 return 0;
             }
+            if (wmId == IDM_CTX_COPY_TITLE && g_selectedTrack >= 0) {
+                const PlaylistItem *it = Playlist_Get(g_selectedTrack);
+                if (it && it->title[0]) {
+                    CopyToClipboard(hWnd, it->title);
+                }
+                return 0;
+            }
             if (wmId == IDM_CTX_OPEN_FOLDER && g_selectedTrack >= 0) {
                 const PlaylistItem *it = Playlist_Get(g_selectedTrack);
                 if (it && it->filePath[0]) {
@@ -3194,6 +3301,34 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             }
             if (wmId == IDM_CTX_REMOVE && g_selectedTrack >= 0) {
                 SendMessageW(hWnd, WM_KEYDOWN, VK_DELETE, 0);
+                return 0;
+            }
+            if (wmId == IDM_CTX_DELETE_DISK && g_selectedTrack >= 0 && g_selectedTrack < Playlist_Count()) {
+                const PlaylistItem *it = Playlist_Get(g_selectedTrack);
+                if (it && it->filePath[0]) {
+                    wchar_t delPath[MAX_PATH];
+                    wcsncpy(delPath, it->filePath, MAX_PATH - 1);
+                    delPath[MAX_PATH - 1] = L'\0';
+                    wchar_t msg[384];
+                    _snwprintf(msg, 383, L"\"%s\" dosyasını cihazınızdan kalıcı olarak silmek istiyor musunuz?", it->title);
+                    msg[383] = L'\0';
+                    if (MessageBoxW(hWnd, msg, L"Cihazdan Sil", MB_YESNO | MB_ICONWARNING) == IDYES) {
+                        if (g_selectedTrack == g_currentTrack) {
+                            Player_Stop();
+                            g_currentTrack = -1;
+                        } else if (g_currentTrack > g_selectedTrack) {
+                            g_currentTrack--;
+                        }
+                        Playlist_Remove(g_selectedTrack);
+                        DeleteFileW(delPath);
+                        if (g_selectedTrack >= Playlist_Count()) {
+                            g_selectedTrack = Playlist_Count() - 1;
+                        }
+                        SyncLocalTrackToFriends();
+                        ApplyFilter(g_searchQuery);
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                }
                 return 0;
             }
             break;
@@ -3403,14 +3538,18 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     if (IsSocialRefreshActive()) {
                         TriggerImmediateFriendsRefresh();
                     }
+                    if (Jam_IsActive() && g_currentTrack < 0 && InterlockedCompareExchange(&g_jamAutoDlBusy, 0, 0) == 0) {
+                        Jam_RequestPartnerStateNow();
+                    }
                 } else if (evt->type == NET_EVENT_MESSAGE) {
                     JamState beforeState = Jam_GetState();
 
                     Friends_HandleNetworkMessage(evt->topic, evt->payload);
                     Jam_HandleNetworkMessage(evt->topic, evt->payload);
 
-                    if (Jam_PollNeedSendCurrentState()) {
-                        BroadcastCurrentJamTrack(Player_GetPosition());
+                    wchar_t askTarget[32] = {0};
+                    while (Jam_PollStateRequestTarget(askTarget, 32)) {
+                        SendCurrentJamTrackToPeer(askTarget);
                     }
 
                     JamRemoteSync rs;
@@ -3418,6 +3557,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                         ApplyRemoteJamSync(&rs);
                     }
 
+                    if (Jam_GetState() == JAM_STATE_NONE && beforeState != JAM_STATE_NONE) {
+                        g_jamWantTitle[0] = L'\0';
+                        g_jamWantYtId[0]  = L'\0';
+                        InterlockedExchange(&g_jamAutoDlCancel, 1);
+                    }
                     if (Jam_GetState() != beforeState) {
                         StartAnimLoop(hWnd);
                     }
@@ -3435,7 +3579,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             g_jamAutoDlPct = pct;
             if (Jam_IsActive() && Jam_IsDownloadingTrack()) {
                 wchar_t msgBuf[128];
-                _snwprintf(msgBuf, 127, L"⚡ Ortak şarkı otomatik indiriliyor (%%%d)...", pct);
+                _snwprintf(msgBuf, 127, L"⚡ Ortak şarkı indiriliyor (%%%d) • Canlı saniyeye eşitlenecek", pct);
                 msgBuf[127] = L'\0';
                 Jam_SetSyncStatus(msgBuf, TRUE, NULL);
                 if (rcJamStage.bottom > rcJamStage.top) {
@@ -3453,30 +3597,56 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             InterlockedExchange(&g_jamAutoDlBusy, 0);
 
             if (task) {
-                if (ok && g_cfg.lastFolder[0]) {
-                    Playlist_ScanFolder(g_cfg.lastFolder);
-                    ApplyFilter(g_searchQuery);
-
-                    int found = Playlist_FindBestMatch(task->title, task->ytId);
-                    if (found >= 0 && Jam_IsActive()) {
-                        int elapsedSec = (int)((GetTickCount() - task->remoteStartTick) / 1000);
-                        int targetPos = task->remoteStartPos + elapsedSec;
-
-                        g_isSyncingFromRemote = TRUE;
-                        PlayTrack(found);
-                        if (targetPos > 0) {
-                            Player_SetPosition(targetPos);
-                        }
-                        g_isSyncingFromRemote = FALSE;
-                        ScrollTrackIntoView(found);
-
-                        Jam_SetSyncStatus(L"✓ Otomatik indirildi • Canlı saniyeye eşitlendi", FALSE, NULL);
-                        Jam_RequestPartnerStateNow();
-                    } else if (Jam_IsActive()) {
-                        Jam_SetSyncStatus(L"⚠ Şarkı bulunamadı • 'İndir' ile manuel ekleyebilirsin", FALSE, task->title);
+                if (!Jam_IsActive()) {
+                    g_jamWantTitle[0] = L'\0';
+                    g_jamWantYtId[0]  = L'\0';
+                } else {
+                    // Indirme sirasinda odada baska bir sarkiya gecildiyse hemen yeni sarkiyi baslat!
+                    BOOL switchedMidDl = FALSE;
+                    if (g_jamWantYtId[0] && task->ytId[0] && _wcsicmp(g_jamWantYtId, task->ytId) != 0) {
+                        switchedMidDl = TRUE;
+                    } else if (g_jamWantTitle[0] && task->title[0] && _wcsicmp(g_jamWantTitle, task->title) != 0) {
+                        switchedMidDl = TRUE;
                     }
-                } else if (Jam_IsActive()) {
-                    Jam_SetSyncStatus(L"⚠ Otomatik indirilemedi • Sağdaki 'İndir' düğmesini kullan", FALSE, task->title);
+
+                    if (switchedMidDl) {
+                        if (ok && g_cfg.lastFolder[0]) {
+                            Playlist_ScanFolder(g_cfg.lastFolder);
+                            ApplyFilter(g_searchQuery);
+                        }
+                        LaunchWantedJamDownloadIfIdle();
+                        free(task);
+                        InvalidateRect(hWnd, NULL, FALSE);
+                        return 0;
+                    }
+
+                    if (ok && g_cfg.lastFolder[0]) {
+                        Playlist_ScanFolder(g_cfg.lastFolder);
+                        ApplyFilter(g_searchQuery);
+
+                        int found = Playlist_FindBestMatch(task->title, task->ytId);
+                        if (found >= 0) {
+                            int targetMs = GetWantedJamLivePosMs();
+                            BOOL startPaused = !g_jamWantPlaying;
+                            g_jamWantTitle[0] = L'\0';
+                            g_jamWantYtId[0]  = L'\0';
+
+                            // ASLA 00:00'dan baslamaz! Dogrudan hesaplanan canli milisaniyede acilir + JAM_ASK ile hassas kilitlenir!
+                            PlayTrackAtMs(found, targetMs, startPaused, TRUE);
+                            ScrollTrackIntoView(found);
+
+                            Jam_SetSyncStatus(
+                                startPaused ? L"✓ Otomatik indirildi • Ortak duraklatmada hazır"
+                                            : L"✓ Otomatik indirildi • Canlı milisaniyeye eşitlendi",
+                                FALSE, NULL
+                            );
+                            Jam_RequestPartnerStateNow();
+                        } else {
+                            Jam_SetSyncStatus(L"⚠ Şarkı bulunamadı • 'İndir' ile manuel ekleyebilirsin", FALSE, task->title);
+                        }
+                    } else {
+                        Jam_SetSyncStatus(L"⚠ Otomatik indirilemedi • Sağdaki 'İndir' düğmesini kullan", FALSE, task->title);
+                    }
                 }
                 free(task);
             }
@@ -3620,16 +3790,18 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     }
                     StartAnimLoop(hWnd);
 
-                    // Jam sırasında eksik şarkıyı manuel indirdiyse hemen senkronla!
+                    // Jam sırasında eksik şarkıyı manuel indirdiyse hemen canlı milisaniyede aç!
                     wchar_t missing[256] = {0};
                     Jam_GetMissingTrack(missing, 256);
                     if (Jam_IsActive() && missing[0]) {
-                        int mIdx = Playlist_FindBestMatch(missing, NULL);
+                        int mIdx = Playlist_FindBestMatch(missing, g_jamWantYtId);
                         if (mIdx >= 0) {
-                            g_isSyncingFromRemote = TRUE;
-                            PlayTrack(mIdx);
-                            g_isSyncingFromRemote = FALSE;
-                            Jam_SetSyncStatus(L"✓ Canlı senkronize", FALSE, NULL);
+                            int targetMs = GetWantedJamLivePosMs();
+                            BOOL startPaused = !g_jamWantPlaying;
+                            g_jamWantTitle[0] = L'\0';
+                            g_jamWantYtId[0]  = L'\0';
+                            PlayTrackAtMs(mIdx, targetMs, startPaused, TRUE);
+                            Jam_SetSyncStatus(L"✓ Canlı milisaniye senkronize", FALSE, NULL);
                             Jam_RequestPartnerStateNow();
                         }
                     }
@@ -3726,7 +3898,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                         Playlist_ScanFolder(filePath);
                     } else {
                         const wchar_t *ext = PathFindExtensionW(filePath);
-                        if (_wcsicmp(ext, L".m3u") == 0 || _wcsicmp(ext, L".m3u8") == 0) {
+                        if (_wcsicmp(ext, L".m3u") == 0 || _wcsicmp(ext, L".m3u8") == 0 || _wcsicmp(ext, L".aurns") == 0) {
                             HandleSmartPlaylistImport(filePath);
                         } else {
                             Playlist_Add(filePath);
@@ -3922,9 +4094,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     HMENU hMenu = CreatePopupMenu();
                     if (hMenu) {
                         AppendMenuW(hMenu, MF_STRING, IDM_CTX_PLAY,        L"Şimdi Çal");
+                        AppendMenuW(hMenu, MF_STRING, IDM_CTX_COPY_TITLE,  L"Parça Adını Kopyala");
                         AppendMenuW(hMenu, MF_STRING, IDM_CTX_OPEN_FOLDER, L"Dosya Konumunu Aç");
                         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
                         AppendMenuW(hMenu, MF_STRING, IDM_CTX_REMOVE,      L"Listeden Kaldır");
+                        AppendMenuW(hMenu, MF_STRING, IDM_CTX_DELETE_DISK, L"Cihazdan Sil");
 
                         POINT scrPt = pt;
                         ClientToScreen(hWnd, &scrPt);
@@ -4106,14 +4280,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                             if (PtInRect(&rcFriendActionBtns[fi], pt)) {
                                 const FriendItem *fItem = Friends_GetFriend(fi);
                                 if (fItem) {
-                                    wchar_t partnerTag[32] = {0};
-                                    Jam_GetPartnerTag(partnerTag, 32);
-                                    if (Jam_GetState() != JAM_STATE_NONE && _wcsicmp(partnerTag, fItem->tag) == 0) {
-                                        Jam_Leave();
-                                        StartAnimLoop(hWnd);
-                                    } else {
+                                    if (!Jam_IsFriendInJam(fItem->tag)) {
                                         Jam_InviteFriend(fItem->tag, fItem->name);
-                                        ToggleSidebar(FALSE);
+                                        StartAnimLoop(hWnd);
+                                    } else if (Jam_GetState() == JAM_STATE_INVITING && Jam_GetMemberCount() == 0) {
+                                        Jam_Leave();
                                         StartAnimLoop(hWnd);
                                     }
                                 }
@@ -4183,6 +4354,9 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 return 0;
             }
             if (hit == ZONE_JAM_LEAVE) {
+                g_jamWantTitle[0] = L'\0';
+                g_jamWantYtId[0]  = L'\0';
+                InterlockedExchange(&g_jamAutoDlCancel, 1);
                 Jam_Leave();
                 StartAnimLoop(hWnd);
                 g_pressedZone = ZONE_NONE;
@@ -4230,12 +4404,12 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 if (Player_IsPlaying()) {
                     Player_Pause();
                     SyncLocalTrackToFriends();
-                    if (Jam_IsActive()) Jam_BroadcastPause(Player_GetPosition());
+                    if (Jam_IsActive()) Jam_BroadcastPause(Player_GetPositionMs());
                 } else {
                     if (g_currentTrack >= 0) {
                         Player_Play();
                         SyncLocalTrackToFriends();
-                        BroadcastCurrentJamTrack(Player_GetPosition());
+                        if (Jam_IsActive()) Jam_BroadcastResume(Player_GetPositionMs());
                     } else if (Playlist_Count() > 0) {
                         PlayTrack(g_selectedTrack >= 0 ? g_selectedTrack : 0);
                     }
@@ -4274,15 +4448,16 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 return 0;
             }
             if (hit == ZONE_SEEK) {
-                int duration = Player_GetDuration();
-                if (duration > 0 && rcSeekBar.right > rcSeekBar.left) {
+                int durationMs = Player_GetDurationMs();
+                if (durationMs > 0 && rcSeekBar.right > rcSeekBar.left) {
                     float ratio = (float)(pt.x - rcSeekBar.left) / (float)(rcSeekBar.right - rcSeekBar.left);
                     if (ratio < 0.0f) ratio = 0.0f;
                     if (ratio > 1.0f) ratio = 1.0f;
-                    g_seekDragSec = (int)(ratio * (float)duration);
+                    int seekMs = (int)(ratio * (float)durationMs);
+                    g_seekDragSec = seekMs / 1000;
                     g_isDraggingSeek = TRUE;
-                    Player_SetPosition(g_seekDragSec);
-                    if (Jam_IsActive()) Jam_BroadcastSeek(g_seekDragSec);
+                    Player_SetPositionMs(seekMs);
+                    if (Jam_IsActive()) Jam_BroadcastSeek(seekMs);
                     InvalidateRect(hWnd, &rcDock, FALSE);
                 }
                 return 0;
@@ -4355,8 +4530,16 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             }
             if (g_isDraggingSeek) {
                 g_isDraggingSeek = FALSE;
-                Player_SetPosition(g_seekDragSec);
-                if (Jam_IsActive()) Jam_BroadcastSeek(g_seekDragSec);
+                int seekMs = g_seekDragSec * 1000;
+                int durMs = Player_GetDurationMs();
+                if (durMs > 0 && rcSeekBar.right > rcSeekBar.left) {
+                    float ratio = (float)(pt.x - rcSeekBar.left) / (float)(rcSeekBar.right - rcSeekBar.left);
+                    if (ratio < 0.0f) ratio = 0.0f;
+                    if (ratio > 1.0f) ratio = 1.0f;
+                    seekMs = (int)(ratio * (float)durMs);
+                }
+                Player_SetPositionMs(seekMs);
+                if (Jam_IsActive()) Jam_BroadcastSeek(seekMs);
                 needRepaint = TRUE;
             }
             if (g_isDraggingVol) {
@@ -4423,11 +4606,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     if (Player_IsPlaying()) {
                         Player_Pause();
                         SyncLocalTrackToFriends();
-                        if (Jam_IsActive()) Jam_BroadcastPause(Player_GetPosition());
+                        if (Jam_IsActive()) Jam_BroadcastPause(Player_GetPositionMs());
                     } else if (g_currentTrack >= 0) {
                         Player_Play();
                         SyncLocalTrackToFriends();
-                        BroadcastCurrentJamTrack(Player_GetPosition());
+                        if (Jam_IsActive()) Jam_BroadcastResume(Player_GetPositionMs());
                     } else if (Playlist_Count() > 0) {
                         PlayTrack(g_selectedTrack >= 0 ? g_selectedTrack : 0);
                     }
@@ -4435,19 +4618,19 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                     return 0;
                 }
                 case VK_LEFT: {
-                    int pos = Player_GetPosition() - 5;
-                    if (pos < 0) pos = 0;
-                    Player_SetPosition(pos);
-                    if (Jam_IsActive()) Jam_BroadcastSeek(pos);
+                    int posMs = Player_GetPositionMs() - 5000;
+                    if (posMs < 0) posMs = 0;
+                    Player_SetPositionMs(posMs);
+                    if (Jam_IsActive()) Jam_BroadcastSeek(posMs);
                     InvalidateRect(hWnd, &rcDock, FALSE);
                     return 0;
                 }
                 case VK_RIGHT: {
-                    int pos = Player_GetPosition() + 5;
-                    int dur = Player_GetDuration();
-                    if (dur > 0 && pos > dur) pos = dur;
-                    Player_SetPosition(pos);
-                    if (Jam_IsActive()) Jam_BroadcastSeek(pos);
+                    int posMs = Player_GetPositionMs() + 5000;
+                    int durMs = Player_GetDurationMs();
+                    if (durMs > 0 && posMs > durMs) posMs = durMs;
+                    Player_SetPositionMs(posMs);
+                    if (Jam_IsActive()) Jam_BroadcastSeek(posMs);
                     InvalidateRect(hWnd, &rcDock, FALSE);
                     return 0;
                 }
@@ -4587,11 +4770,11 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                 if (Player_IsPlaying()) {
                     Player_Pause();
                     SyncLocalTrackToFriends();
-                    if (Jam_IsActive()) Jam_BroadcastPause(Player_GetPosition());
+                    if (Jam_IsActive()) Jam_BroadcastPause(Player_GetPositionMs());
                 } else if (g_currentTrack >= 0) {
                     Player_Play();
                     SyncLocalTrackToFriends();
-                    BroadcastCurrentJamTrack(Player_GetPosition());
+                    if (Jam_IsActive()) Jam_BroadcastResume(Player_GetPositionMs());
                 } else if (Playlist_Count() > 0) {
                     PlayTrack(0);
                 }
@@ -4629,6 +4812,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             KillTimer(hWnd, IDT_UPDATE_TIMER);
             if (g_animTimerActive) KillTimer(hWnd, IDT_ANIM_TIMER);
             InterlockedExchange(&g_plDlCancel, 1);
+            InterlockedExchange(&g_jamAutoDlCancel, 1);
 
             Jam_Leave();
             Friends_NotifyOffline();
