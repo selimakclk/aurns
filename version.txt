@@ -1,6 +1,6 @@
-1.1.0
+1.2.0
 https://raw.githubusercontent.com/selimakclk/aurns/main/Aurns.exe
-- Akilli Oynatma Listesi Paylasimi: Arkadasinizin paylastigi oynatma listesini ice aktardiginizda bilgisayarinizda olmayan sarkilar otomatik olarak arka planda indirilir ve aninda listeye eklenir.
-- Evrensel Canli Indirme Yuzdesi ve Durum Cubugu: Tekli sarki indirme, paylasilan liste indirme, Canli Jam otomatik indirme ve uygulama guncellemelerinde gercek zamanli yuzde (%) ve ilerleme cubugu gosterilir.
-- Apple Akiskan Arayuz ve Ultra Hizli Baslangic: Sifir takilma ile aninda acilan pencere, kesintiye ugratilabilir yay fizigi ve maksimum hafiflikte optimize edilmis pikselsel cizim motoru.
-- Tum eski kodlar ve gereksiz ikili dosyalar temizlendi; yalnizca saf Aurns.exe mimarisi.
+- Çapraz Platform Jam (Telefon <-> Telefon ve Telefon <-> Bilgisayar): Eşzamanlı müzik dinleme, duraklatma, devam etme ve sarma (seek) senkronizasyonu.
+- Aktif Kullanıcı Doğrulama: Arkadaş eklerken kullanıcının çevrimiçi varlığı anlık PING/PONG ile doğrulanır (Bulunamadıysa 'Böyle bir kullanıcı yok veya çevrimdışı!', bulunduysa 'İstek gönderildi!').
+- 4 Kanallı Paralel Hızlı İndirme (MYT Hızı): Şarkılar eşzamanlı parçalarla 4 kat daha hızlı indirilir.
+- Kişiselleştirilebilir Kullanıcı Adı & Sabit Değişmez Etiket Kimliği.
