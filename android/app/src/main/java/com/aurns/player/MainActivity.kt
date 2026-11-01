@@ -88,6 +88,11 @@ class MainActivity : ComponentActivity() {
     private val currentPositionFlow = MutableStateFlow(0)
     private val durationFlow = MutableStateFlow(0)
 
+    // Jam Canlı Senkronizasyon ve Eksik Parça Otomatik Atlatma (Seek-to-Live)
+    private var jamAutoDlPendingTitle: String? = null
+    private var jamAutoDlRemoteStartPos = 0
+    private var jamAutoDlRemoteStartTime = 0L
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -102,8 +107,30 @@ class MainActivity : ComponentActivity() {
         friendsManager = FriendsManager(this)
 
         downloadManager.onDownloadFinishedListener = {
-            loadLocalTracks()
-            Toast.makeText(this, "Şarkı kütüphaneye eklendi!", Toast.LENGTH_SHORT).show()
+            val updatedTracks = MusicScanner.scanLocalTracks(this)
+            tracks.clear()
+            tracks.addAll(updatedTracks)
+
+            val pendingTitle = jamAutoDlPendingTitle
+            if (pendingTitle != null && friendsManager.jamState.value.isActive) {
+                val newIdx = updatedTracks.indexOfFirst {
+                    it.title.contains(pendingTitle, ignoreCase = true) || pendingTitle.contains(it.title, ignoreCase = true)
+                }
+                if (newIdx != -1) {
+                    val elapsedSec = ((System.currentTimeMillis() - jamAutoDlRemoteStartTime) / 1000).toInt()
+                    val targetPosSec = jamAutoDlRemoteStartPos + elapsedSec
+
+                    playTrack(newIdx, isRemoteSync = true)
+                    if (targetPosSec > 0) {
+                        seekTo(targetPosSec, isRemoteSync = true)
+                    }
+                    friendsManager.requestJamPartnerState()
+                    Toast.makeText(this, "✓ Ortak şarkı indirildi • Canlı saniyeye eşitlendi!", Toast.LENGTH_SHORT).show()
+                }
+                jamAutoDlPendingTitle = null
+            } else {
+                Toast.makeText(this, "Şarkı kütüphaneye eklendi!", Toast.LENGTH_SHORT).show()
+            }
         }
 
         // Arkadaş Jam üzerinden şarkı senkronize ettiğinde (Phone <-> Phone & Phone <-> PC)
@@ -113,11 +140,27 @@ class MainActivity : ComponentActivity() {
                     it.title.contains(title, ignoreCase = true) || title.contains(it.title, ignoreCase = true)
                 }
                 if (idx != -1) {
-                    playTrack(idx)
-                    if (posSec > 0) seekTo(posSec)
+                    playTrack(idx, isRemoteSync = true)
+                    if (posSec > 0) seekTo(posSec, isRemoteSync = true)
                     Toast.makeText(this, "Jam: '$title' senkronize edildi", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(this, "Jam: Arkadaşın '$title' çalıyor", Toast.LENGTH_SHORT).show()
+                    // Şarkı sende yok! Otomatik olarak arka planda indir ve canlı saniyeye atla
+                    Toast.makeText(this, "⚡ '$title' sende yok • Otomatik indiriliyor...", Toast.LENGTH_SHORT).show()
+                    jamAutoDlPendingTitle = title
+                    jamAutoDlRemoteStartPos = posSec
+                    jamAutoDlRemoteStartTime = System.currentTimeMillis()
+
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        try {
+                            val results = InnertubeResolver.search(title)
+                            val best = results.firstOrNull()
+                            if (best != null) {
+                                downloadManager.startDownload(best.videoId, best.title, best.artist)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
                 }
             }
         }
@@ -134,6 +177,19 @@ class MainActivity : ComponentActivity() {
                 } else if (playFlag == 1) {
                     mediaController?.play()
                     isPlaying = true
+                }
+            }
+        }
+
+        // Arkadaş bizim anlık çalma konumumuzu sorduğunda (JAM_ASK)
+        friendsManager.onRemoteJamAskRequest = {
+            runOnUiThread {
+                mediaController?.let { p ->
+                    val curPosSec = (p.currentPosition / 1000).toInt()
+                    val title = if (currentTrackIndex in tracks.indices) tracks[currentTrackIndex].title else ""
+                    if (title.isNotEmpty()) {
+                        friendsManager.broadcastJamState(title, p.isPlaying, curPosSec)
+                    }
                 }
             }
         }
@@ -232,7 +288,7 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    private fun playTrack(index: Int) {
+    private fun playTrack(index: Int, isRemoteSync: Boolean = false) {
         if (index < 0 || index >= tracks.size) return
         currentTrackIndex = index
         val track = tracks[index]
@@ -242,6 +298,9 @@ class MainActivity : ComponentActivity() {
             p.play()
         }
         friendsManager.updateLocalPlaybackState(true, track.title)
+        if (!isRemoteSync && friendsManager.jamState.value.isActive) {
+            friendsManager.broadcastJamState(track.title, true, 0)
+        }
     }
 
     private fun togglePlayPause() {
@@ -261,9 +320,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun seekTo(sec: Int) {
+    private fun seekTo(sec: Int, isRemoteSync: Boolean = false) {
         mediaController?.seekTo(sec * 1000L)
-        if (currentTrackIndex in tracks.indices) {
+        if (!isRemoteSync && currentTrackIndex in tracks.indices && friendsManager.jamState.value.isActive) {
             val title = tracks[currentTrackIndex].title
             friendsManager.broadcastJamState(title, isPlaying, sec)
             friendsManager.broadcastJamPos(-1, sec)

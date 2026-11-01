@@ -81,6 +81,7 @@ class FriendsManager(private val context: Context) {
     // Jam dinleyici callback'leri
     var onRemoteJamPlayRequest: ((title: String, posSec: Int) -> Unit)? = null
     var onRemoteJamPosRequest: ((playFlag: Int, posSec: Int) -> Unit)? = null
+    var onRemoteJamAskRequest: (() -> Unit)? = null
 
     // Kullanıcı varlık / çevrimiçi kontrol sorguları
     private val pendingUserQueries = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
@@ -504,6 +505,14 @@ class FriendsManager(private val context: Context) {
                         onRemoteJamPosRequest?.invoke(playFlag, posSec)
                     }
                 }
+
+                // 7. JAM KONUM / DURUM TALEBİ: JAM_ASK|fromTag|jamId
+                "JAM_ASK" -> {
+                    val curJam = _jamState.value
+                    if (curJam.isActive) {
+                        onRemoteJamAskRequest?.invoke()
+                    }
+                }
             }
         }
     }
@@ -756,6 +765,17 @@ class FriendsManager(private val context: Context) {
 
         val partnerKey = tagToTopicKey(st.partnerTag)
         val payload = "JAM_POS|${_myTag.value}|${st.jamId}|$playFlag|$posSec"
+        scope.launch {
+            sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
+        }
+    }
+
+    fun requestJamPartnerState() {
+        val st = _jamState.value
+        if (!st.isActive || st.partnerTag.isBlank()) return
+
+        val partnerKey = tagToTopicKey(st.partnerTag)
+        val payload = "JAM_ASK|${_myTag.value}|${st.jamId}"
         scope.launch {
             sendMqttPublish(outputStream, "seloplayer/u/$partnerKey", payload)
         }

@@ -1159,6 +1159,8 @@ typedef struct {
     wchar_t title[256];
     wchar_t ytId[16];
     wchar_t folder[MAX_PATH];
+    int     remoteStartPos;
+    DWORD   remoteStartTick;
 } JamAutoDlTask;
 
 static void EnsureDefaultMusicFolder(wchar_t *outFolder, int maxLen) {
@@ -1206,7 +1208,7 @@ static DWORD WINAPI JamAutoDownloadThread(LPVOID param) {
     return 0;
 }
 
-static void StartJamAutoDownload(const wchar_t *trackTitle, const wchar_t *ytId) {
+static void StartJamAutoDownload(const wchar_t *trackTitle, const wchar_t *ytId, int remoteStartPos) {
     if (!trackTitle || !trackTitle[0]) return;
     if (InterlockedCompareExchange(&g_jamAutoDlBusy, 1, 0) != 0) {
         return;
@@ -1219,6 +1221,8 @@ static void StartJamAutoDownload(const wchar_t *trackTitle, const wchar_t *ytId)
     }
     wcsncpy(task->title, trackTitle, 255);
     if (ytId) wcsncpy(task->ytId, ytId, 15);
+    task->remoteStartPos = remoteStartPos;
+    task->remoteStartTick = GetTickCount();
     EnsureDefaultMusicFolder(task->folder, MAX_PATH);
 
     g_jamAutoDlPct = 0;
@@ -1453,7 +1457,7 @@ static void ApplyRemoteJamSync(const JamRemoteSync *rs) {
         Player_Stop();
         g_currentTrack = -1;
         SyncLocalTrackToFriends();
-        StartJamAutoDownload(rs->trackTitle, rs->ytId);
+        StartJamAutoDownload(rs->trackTitle, rs->ytId, rs->posSec);
     }
 
     g_isSyncingFromRemote = FALSE;
@@ -3455,12 +3459,18 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
 
                     int found = Playlist_FindBestMatch(task->title, task->ytId);
                     if (found >= 0 && Jam_IsActive()) {
+                        int elapsedSec = (int)((GetTickCount() - task->remoteStartTick) / 1000);
+                        int targetPos = task->remoteStartPos + elapsedSec;
+
                         g_isSyncingFromRemote = TRUE;
                         PlayTrack(found);
+                        if (targetPos > 0) {
+                            Player_SetPosition(targetPos);
+                        }
                         g_isSyncingFromRemote = FALSE;
                         ScrollTrackIntoView(found);
 
-                        Jam_SetSyncStatus(L"✓ Otomatik indirildi • Canlı saniye eşitleniyor...", FALSE, NULL);
+                        Jam_SetSyncStatus(L"✓ Otomatik indirildi • Canlı saniyeye eşitlendi", FALSE, NULL);
                         Jam_RequestPartnerStateNow();
                     } else if (Jam_IsActive()) {
                         Jam_SetSyncStatus(L"⚠ Şarkı bulunamadı • 'İndir' ile manuel ekleyebilirsin", FALSE, task->title);
