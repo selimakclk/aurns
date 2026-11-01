@@ -230,7 +230,6 @@ class AudioDownloadManager(private val context: Context) {
                     withContext(Dispatchers.Main) {
                         onDownloadFinishedListener?.invoke()
                     }
-                }
             } catch (e: Exception) {
                 if (isActive) {
                     _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = e.localizedMessage)
