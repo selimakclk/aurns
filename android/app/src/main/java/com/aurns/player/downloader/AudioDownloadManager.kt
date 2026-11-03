@@ -62,15 +62,6 @@ class AudioDownloadManager(private val context: Context) {
         }
     }
 
-    private fun buildFastChunkUrl(baseUrl: String, start: Long, end: Long): String {
-        return if (baseUrl.contains("&range=") || baseUrl.contains("?range=")) {
-            baseUrl
-        } else {
-            val sep = if (baseUrl.contains('?')) '&' else '?'
-            "${baseUrl}${sep}range=$start-$end"
-        }
-    }
-
     suspend fun downloadTrackSync(
         videoId: String,
         title: String,
@@ -105,59 +96,52 @@ class AudioDownloadManager(private val context: Context) {
 
         try {
             val totalBytes = streamInfo.contentLength
-            val ua = streamInfo.userAgent
+            val ua = streamInfo.userAgent.ifBlank { InnertubeResolver.UA_VISIONOS }
+            var downloadSuccess = false
 
-            if (totalBytes > 192 * 1024) {
-                RandomAccessFile(tempFile, "rw").use { raf ->
-                    raf.setLength(totalBytes)
-                }
+            if (totalBytes > 256 * 1024) {
+                try {
+                    RandomAccessFile(tempFile, "rw").use { raf ->
+                        raf.setLength(totalBytes)
+                    }
 
-                // 6 paralel &range= kanali: YouTube CDN hiz sinirini tamamen devre disi birakir!
-                val partCount = if (totalBytes > 1_500_000L) 6 else 4
-                val chunkSize = totalBytes / partCount
-                val totalReadAtomic = AtomicLong(0L)
-                val lastUiUpdateMs = AtomicLong(0L)
+                    val partCount = 4
+                    val chunkSize = totalBytes / partCount
+                    val totalReadAtomic = AtomicLong(0L)
+                    val lastUiUpdateMs = AtomicLong(0L)
 
-                coroutineScope {
-                    val jobs = (0 until partCount).map { partIdx ->
-                        async(Dispatchers.IO) {
-                            val start = partIdx * chunkSize
-                            val end = if (partIdx == partCount - 1) totalBytes - 1 else (start + chunkSize - 1)
-                            val rangedUrl = buildFastChunkUrl(streamInfo.url, start, end)
+                    coroutineScope {
+                        val jobs = (0 until partCount).map { partIdx ->
+                            async(Dispatchers.IO) {
+                                val start = partIdx * chunkSize
+                                val end = if (partIdx == partCount - 1) totalBytes - 1 else (start + chunkSize - 1)
 
-                            val chunkReq = Request.Builder()
-                                .url(rangedUrl)
-                                .header("User-Agent", ua)
-                                .header("Accept", "*/*")
-                                .build()
+                                val chunkReq = Request.Builder()
+                                    .url(streamInfo.url)
+                                    .header("User-Agent", ua)
+                                    .header("Range", "bytes=$start-$end")
+                                    .header("Accept", "*/*")
+                                    .build()
 
-                            client.newCall(chunkReq).execute().use { chunkResp ->
-                                if (!chunkResp.isSuccessful && chunkResp.code != 206) {
-                                    // Yedek olarak standart HTTP Range basligi ile dene
-                                    val fallbackReq = Request.Builder()
-                                        .url(streamInfo.url)
-                                        .header("User-Agent", ua)
-                                        .header("Range", "bytes=$start-$end")
-                                        .header("Accept", "*/*")
-                                        .build()
-                                    client.newCall(fallbackReq).execute().use { fbResp ->
-                                        if (!fbResp.isSuccessful && fbResp.code != 206) {
-                                            throw Exception("Parça indirme hatası: HTTP ${fbResp.code}")
-                                        }
-                                        val fbBody = fbResp.body ?: throw Exception("Boş parça yanıtı")
-                                        writeStreamSlice(fbBody.byteStream(), tempFile, start, end - start + 1, totalBytes, title, activeHeadline, totalReadAtomic, lastUiUpdateMs)
+                                client.newCall(chunkReq).execute().use { chunkResp ->
+                                    if (!chunkResp.isSuccessful && chunkResp.code != 206) {
+                                        throw Exception("Parça indirme hatası: HTTP ${chunkResp.code}")
                                     }
-                                    return@use
+                                    val cBody = chunkResp.body ?: throw Exception("Boş parça yanıtı")
+                                    writeStreamSlice(cBody.byteStream(), tempFile, start, end - start + 1, totalBytes, title, activeHeadline, totalReadAtomic, lastUiUpdateMs)
                                 }
-
-                                val cBody = chunkResp.body ?: throw Exception("Boş parça yanıtı")
-                                writeStreamSlice(cBody.byteStream(), tempFile, start, end - start + 1, totalBytes, title, activeHeadline, totalReadAtomic, lastUiUpdateMs)
                             }
                         }
+                        jobs.awaitAll()
                     }
-                    jobs.awaitAll()
+                    downloadSuccess = true
+                } catch (_: Exception) {
+                    downloadSuccess = false
                 }
-            } else {
+            }
+
+            // Çok parçalı Range isteği herhangi bir sebepten başarısız olursa temiz tekil akışla tamamla
+            if (!downloadSuccess) {
                 val req = Request.Builder()
                     .url(streamInfo.url)
                     .header("User-Agent", ua)
@@ -173,6 +157,9 @@ class AudioDownloadManager(private val context: Context) {
                         _currentProgress.value = DownloadProgress(title, 0, isRunning = false, error = "Gelen veri boş", headline = activeHeadline)
                         return@withContext false
                     }
+                    val streamTotal = if (totalBytes > 0) totalBytes else body.contentLength()
+                    var streamRead = 0L
+                    var lastUiMs = 0L
                     body.byteStream().use { inStream ->
                         FileOutputStream(tempFile).use { outStream ->
                             val buffer = ByteArray(128 * 1024)
@@ -180,6 +167,13 @@ class AudioDownloadManager(private val context: Context) {
                                 val read = inStream.read(buffer)
                                 if (read == -1) break
                                 outStream.write(buffer, 0, read)
+                                streamRead += read
+                                val now = System.currentTimeMillis()
+                                if (now - lastUiMs > 75 && streamTotal > 0) {
+                                    lastUiMs = now
+                                    val pct = ((streamRead.toDouble() / streamTotal) * 100).toInt().coerceIn(2, 99)
+                                    _currentProgress.value = DownloadProgress(title, pct, isRunning = true, headline = activeHeadline)
+                                }
                             }
                             outStream.flush()
                         }
@@ -220,8 +214,7 @@ class AudioDownloadManager(private val context: Context) {
                         resolver.update(mediaUri, contentValues, null, null)
                         savedToMediaStore = true
                     }
-                } catch (_: Exception) {
-                }
+                } catch (_: Exception) {}
             } else {
                 try {
                     val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
@@ -238,7 +231,7 @@ class AudioDownloadManager(private val context: Context) {
                 } catch (_: Exception) {}
             }
 
-            // Yalnizca birincil kayit basarisizsa yedek klasore yaz (cifte disk yazma gecikmesini onler!)
+            // Yalnızca birincil kayıt başarısızsa yedek klasöre yaz
             if (!savedToMediaStore) {
                 saveToFallback(tempFile, safeFileName, streamInfo.mimeType)
             }
@@ -302,8 +295,7 @@ class AudioDownloadManager(private val context: Context) {
             val destFile = File(aurnsFallback, safeFileName)
             tempFile.copyTo(destFile, overwrite = true, bufferSize = 256 * 1024)
             MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf(mimeType), null)
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     fun cancelActiveDownload() {

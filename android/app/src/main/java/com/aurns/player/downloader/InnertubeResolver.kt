@@ -32,7 +32,7 @@ object InnertubeResolver {
 
     val sharedHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectionPool(ConnectionPool(12, 3, TimeUnit.MINUTES))
-        .connectTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
@@ -41,12 +41,52 @@ object InnertubeResolver {
 
     private const val UA_DESKTOP =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    private const val UA_ANDROID_VR =
-        "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
-    private const val UA_IOS =
-        "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)"
-    private const val UA_VISIONOS =
+    const val UA_VISIONOS =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+    const val UA_IOS =
+        "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)"
+
+    @Volatile private var cachedVisitorId: String? = null
+    @Volatile private var visitorIdTimestamp: Long = 0L
+
+    private suspend fun getFastVisitorId(): String? = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (!cachedVisitorId.isNullOrEmpty() && (now - visitorIdTimestamp) < 6 * 3600 * 1000L) {
+            return@withContext cachedVisitorId
+        }
+
+        try {
+            val reqBody = JSONObject().apply {
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        put("clientName", "WEB")
+                        put("clientVersion", "2.20250101.00.00")
+                        put("hl", "tr")
+                        put("gl", "TR")
+                    })
+                })
+            }
+
+            val req = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/visitor_id")
+                .header("User-Agent", UA_DESKTOP)
+                .header("Content-Type", "application/json")
+                .post(reqBody.toString().toRequestBody(JSON_MEDIA))
+                .build()
+
+            sharedHttpClient.newCall(req).execute().use { resp ->
+                val bodyStr = resp.body?.string().orEmpty()
+                val json = JSONObject(bodyStr)
+                val vis = json.optJSONObject("responseContext")?.optString("visitorData")
+                if (!vis.isNullOrEmpty()) {
+                    cachedVisitorId = vis
+                    visitorIdTimestamp = now
+                    return@withContext vis
+                }
+            }
+        } catch (_: Exception) {}
+        return@withContext cachedVisitorId
+    }
 
     suspend fun search(query: String): List<SearchResult> = withContext(Dispatchers.IO) {
         val results = mutableListOf<SearchResult>()
@@ -106,59 +146,62 @@ object InnertubeResolver {
                     if (results.size >= 30) break
                 }
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         return@withContext results
     }
 
-    /**
-     * Sifir on-istekli ultra hizli (~90ms) dogrudan CDN ses cozucu:
-     * 1) ANDROID_VR (kisitlamasiz tam bant genisligi M4A)
-     * 2) IOS (kisitlamasiz M4A yedek)
-     * 3) VISIONOS (son yedek)
-     */
     suspend fun resolveAudioStream(videoId: String): StreamInfo? = withContext(Dispatchers.IO) {
-        tryResolveWithAndroidVr(videoId)?.let { return@withContext it }
-        tryResolveWithIos(videoId)?.let { return@withContext it }
         tryResolveWithVisionOs(videoId)?.let { return@withContext it }
+        tryResolveWithIos(videoId)?.let { return@withContext it }
         return@withContext null
     }
 
-    private fun tryResolveWithAndroidVr(videoId: String): StreamInfo? {
+    private suspend fun tryResolveWithVisionOs(videoId: String): StreamInfo? {
+        val visitorId = getFastVisitorId()
         return try {
             val reqBody = JSONObject().apply {
                 put("videoId", videoId)
                 put("contentCheckOk", true)
                 put("racyCheckOk", true)
+                put("playbackContext", JSONObject().apply {
+                    put("contentPlaybackContext", JSONObject().apply {
+                        put("html5Preference", "HTML5_PREF_WANTS")
+                        put("signatureTimestamp", 20753)
+                    })
+                })
                 put("context", JSONObject().apply {
                     put("client", JSONObject().apply {
-                        put("clientName", "ANDROID_VR")
-                        put("clientVersion", "1.60.19")
-                        put("deviceMake", "Oculus")
-                        put("deviceModel", "Quest 3")
-                        put("androidSdkVersion", 32)
-                        put("userAgent", UA_ANDROID_VR)
-                        put("osName", "Android")
-                        put("osVersion", "12L")
+                        put("clientName", "VISIONOS")
+                        put("clientVersion", "1.02")
+                        put("deviceMake", "Apple")
+                        put("deviceModel", "RealityDevice17,1")
+                        put("userAgent", UA_VISIONOS)
+                        put("osName", "visionOS")
+                        put("osVersion", "26.5.23O471")
                         put("hl", "en")
                         put("gl", "US")
+                        if (!visitorId.isNullOrEmpty()) {
+                            put("visitorData", visitorId)
+                        }
                     })
                 })
             }
 
-            val req = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
-                .header("User-Agent", UA_ANDROID_VR)
+                .header("User-Agent", UA_VISIONOS)
                 .header("Content-Type", "application/json")
-                .header("X-YouTube-Client-Name", "28")
-                .header("X-YouTube-Client-Version", "1.60.19")
-                .post(reqBody.toString().toRequestBody(JSON_MEDIA))
-                .build()
+                .header("X-YouTube-Client-Name", "101")
+                .header("X-YouTube-Client-Version", "1.02")
 
-            sharedHttpClient.newCall(req).execute().use { resp ->
+            if (!visitorId.isNullOrEmpty()) {
+                reqBuilder.header("X-Goog-Visitor-Id", visitorId)
+            }
+
+            sharedHttpClient.newCall(reqBuilder.post(reqBody.toString().toRequestBody(JSON_MEDIA)).build()).execute().use { resp ->
                 if (!resp.isSuccessful) return null
                 val bodyStr = resp.body?.string() ?: return null
-                extractBestAudio(JSONObject(bodyStr), UA_ANDROID_VR)
+                extractBestAudio(JSONObject(bodyStr), UA_VISIONOS)
             }
         } catch (_: Exception) {
             null
@@ -205,46 +248,6 @@ object InnertubeResolver {
         }
     }
 
-    private fun tryResolveWithVisionOs(videoId: String): StreamInfo? {
-        return try {
-            val reqBody = JSONObject().apply {
-                put("videoId", videoId)
-                put("contentCheckOk", true)
-                put("racyCheckOk", true)
-                put("context", JSONObject().apply {
-                    put("client", JSONObject().apply {
-                        put("clientName", "VISIONOS")
-                        put("clientVersion", "1.02")
-                        put("deviceMake", "Apple")
-                        put("deviceModel", "RealityDevice17,1")
-                        put("userAgent", UA_VISIONOS)
-                        put("osName", "visionOS")
-                        put("osVersion", "26.5.23O471")
-                        put("hl", "en")
-                        put("gl", "US")
-                    })
-                })
-            }
-
-            val req = Request.Builder()
-                .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
-                .header("User-Agent", UA_VISIONOS)
-                .header("Content-Type", "application/json")
-                .header("X-YouTube-Client-Name", "101")
-                .header("X-YouTube-Client-Version", "1.02")
-                .post(reqBody.toString().toRequestBody(JSON_MEDIA))
-                .build()
-
-            sharedHttpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val bodyStr = resp.body?.string() ?: return null
-                extractBestAudio(JSONObject(bodyStr), UA_VISIONOS)
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
     private fun extractBestAudio(json: JSONObject, ua: String): StreamInfo? {
         val adaptive = json.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
             ?: return null
@@ -278,7 +281,6 @@ object InnertubeResolver {
                 bestAny = info
             }
         }
-        // Gercek M4A (audio/mp4) oncelikli secilir: MediaStore ve ExoPlayer anlik milisaniye seek uyumu %100!
         return bestMp4 ?: bestAny
     }
 
