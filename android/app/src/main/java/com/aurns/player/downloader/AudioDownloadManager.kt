@@ -11,12 +11,10 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 data class DownloadProgress(
@@ -27,8 +25,6 @@ data class DownloadProgress(
     val error: String? = null,
     val headline: String = ""
 )
-
-private const val UA_VISIONOS = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 
 class AudioDownloadManager(private val context: Context) {
 
@@ -41,10 +37,7 @@ class AudioDownloadManager(private val context: Context) {
 
     var onDownloadFinishedListener: (() -> Unit)? = null
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val client get() = InnertubeResolver.sharedHttpClient
 
     fun showBannerMessage(headline: String, title: String, percent: Int, isRunning: Boolean, isDone: Boolean = false) {
         _currentProgress.value = DownloadProgress(
@@ -61,7 +54,7 @@ class AudioDownloadManager(private val context: Context) {
         downloadJob = scope.launch {
             val ok = downloadTrackSync(videoId, title, artist, customHeadline, showErrorToast = true)
             if (ok) {
-                delay(220)
+                delay(80)
                 withContext(Dispatchers.Main) {
                     onDownloadFinishedListener?.invoke()
                 }
@@ -69,7 +62,15 @@ class AudioDownloadManager(private val context: Context) {
         }
     }
 
-    // Hem tekil indirme, hem Jam eksik sarki yakalama, hem de Paylasilan Oynatma Listesi kuyrugu tarafindan ortak kullanilir!
+    private fun buildFastChunkUrl(baseUrl: String, start: Long, end: Long): String {
+        return if (baseUrl.contains("&range=") || baseUrl.contains("?range=")) {
+            baseUrl
+        } else {
+            val sep = if (baseUrl.contains('?')) '&' else '?'
+            "${baseUrl}${sep}range=$start-$end"
+        }
+    }
+
     suspend fun downloadTrackSync(
         videoId: String,
         title: String,
@@ -77,8 +78,8 @@ class AudioDownloadManager(private val context: Context) {
         customHeadline: String = "",
         showErrorToast: Boolean = false
     ): Boolean = withContext(Dispatchers.IO) {
-        val activeHeadline = customHeadline.ifEmpty { "PARÇA İNDİRİLİYOR (MYT HIZI)" }
-        _currentProgress.value = DownloadProgress(title, 0, isRunning = true, headline = activeHeadline)
+        val activeHeadline = customHeadline.ifEmpty { "PARÇA İNDİRİLİYOR (YÜKSEK HIZ)" }
+        _currentProgress.value = DownloadProgress(title, 2, isRunning = true, headline = activeHeadline)
 
         val streamInfo = InnertubeResolver.resolveAudioStream(videoId)
         if (streamInfo == null || streamInfo.url.isEmpty()) {
@@ -91,7 +92,6 @@ class AudioDownloadManager(private val context: Context) {
             return@withContext false
         }
 
-        // Windows ile %100 ayni [videoId] dosya isimlendirme formati: Jam ve Akilli Liste eslestirmesini garantiler!
         val safeBaseName = title
             .replace(Regex("\\[([A-Za-z0-9_-]{11})]\\s*$"), "")
             .replace(Regex("[^a-zA-Z0-9çğıöşüÇĞİÖŞÜ\\s-_.]"), "")
@@ -100,65 +100,58 @@ class AudioDownloadManager(private val context: Context) {
             .take(64)
 
         val idSuffix = if (videoId.length == 11) " [$videoId]" else ""
-        val safeFileName = "$safeBaseName$idSuffix.m4a"
+        val safeFileName = "$safeBaseName$idSuffix.${streamInfo.fileExt}"
         val tempFile = File(context.cacheDir, "dl_${System.nanoTime()}.tmp")
 
         try {
             val totalBytes = streamInfo.contentLength
+            val ua = streamInfo.userAgent
 
-            if (totalBytes > 256 * 1024) {
-                val raf = RandomAccessFile(tempFile, "rw")
-                raf.setLength(totalBytes)
-                raf.close()
+            if (totalBytes > 192 * 1024) {
+                RandomAccessFile(tempFile, "rw").use { raf ->
+                    raf.setLength(totalBytes)
+                }
 
-                val partCount = 4
+                // 6 paralel &range= kanali: YouTube CDN hiz sinirini tamamen devre disi birakir!
+                val partCount = if (totalBytes > 1_500_000L) 6 else 4
                 val chunkSize = totalBytes / partCount
                 val totalReadAtomic = AtomicLong(0L)
-                var lastUpdate = System.currentTimeMillis()
+                val lastUiUpdateMs = AtomicLong(0L)
 
                 coroutineScope {
                     val jobs = (0 until partCount).map { partIdx ->
                         async(Dispatchers.IO) {
                             val start = partIdx * chunkSize
                             val end = if (partIdx == partCount - 1) totalBytes - 1 else (start + chunkSize - 1)
+                            val rangedUrl = buildFastChunkUrl(streamInfo.url, start, end)
 
                             val chunkReq = Request.Builder()
-                                .url(streamInfo.url)
-                                .header("User-Agent", UA_VISIONOS)
-                                .header("Range", "bytes=$start-$end")
-                                .header("Origin", "https://www.youtube.com")
+                                .url(rangedUrl)
+                                .header("User-Agent", ua)
                                 .header("Accept", "*/*")
                                 .build()
 
                             client.newCall(chunkReq).execute().use { chunkResp ->
                                 if (!chunkResp.isSuccessful && chunkResp.code != 206) {
-                                    throw Exception("Parça indirme hatası: HTTP ${chunkResp.code}")
-                                }
-                                val cBody = chunkResp.body ?: throw Exception("Boş parça yanıtı")
-                                cBody.byteStream().use { cStream ->
-                                    RandomAccessFile(tempFile, "rw").use { partRaf ->
-                                        partRaf.seek(start)
-                                        val buffer = ByteArray(64 * 1024)
-                                        var partRead = 0L
-                                        val partTarget = end - start + 1
-
-                                        while (isActive && partRead < partTarget) {
-                                            val toRead = minOf(buffer.size.toLong(), partTarget - partRead).toInt()
-                                            val read = cStream.read(buffer, 0, toRead)
-                                            if (read == -1) break
-                                            partRaf.write(buffer, 0, read)
-                                            partRead += read
-                                            val curTotal = totalReadAtomic.addAndGet(read.toLong())
-
-                                            val now = System.currentTimeMillis()
-                                            if (now - lastUpdate > 75) {
-                                                val pct = ((curTotal.toDouble() / totalBytes) * 100).toInt().coerceIn(0, 99)
-                                                _currentProgress.value = DownloadProgress(title, pct, isRunning = true, headline = activeHeadline)
-                                                lastUpdate = now
-                                            }
+                                    // Yedek olarak standart HTTP Range basligi ile dene
+                                    val fallbackReq = Request.Builder()
+                                        .url(streamInfo.url)
+                                        .header("User-Agent", ua)
+                                        .header("Range", "bytes=$start-$end")
+                                        .header("Accept", "*/*")
+                                        .build()
+                                    client.newCall(fallbackReq).execute().use { fbResp ->
+                                        if (!fbResp.isSuccessful && fbResp.code != 206) {
+                                            throw Exception("Parça indirme hatası: HTTP ${fbResp.code}")
                                         }
+                                        val fbBody = fbResp.body ?: throw Exception("Boş parça yanıtı")
+                                        writeStreamSlice(fbBody.byteStream(), tempFile, start, end - start + 1, totalBytes, title, activeHeadline, totalReadAtomic, lastUiUpdateMs)
                                     }
+                                    return@use
                                 }
+
+                                val cBody = chunkResp.body ?: throw Exception("Boş parça yanıtı")
+                                writeStreamSlice(cBody.byteStream(), tempFile, start, end - start + 1, totalBytes, title, activeHeadline, totalReadAtomic, lastUiUpdateMs)
                             }
                         }
                     }
@@ -167,8 +160,7 @@ class AudioDownloadManager(private val context: Context) {
             } else {
                 val req = Request.Builder()
                     .url(streamInfo.url)
-                    .header("User-Agent", UA_VISIONOS)
-                    .header("Origin", "https://www.youtube.com")
+                    .header("User-Agent", ua)
                     .header("Accept", "*/*")
                     .build()
 
@@ -183,7 +175,7 @@ class AudioDownloadManager(private val context: Context) {
                     }
                     body.byteStream().use { inStream ->
                         FileOutputStream(tempFile).use { outStream ->
-                            val buffer = ByteArray(64 * 1024)
+                            val buffer = ByteArray(128 * 1024)
                             while (isActive) {
                                 val read = inStream.read(buffer)
                                 if (read == -1) break
@@ -197,6 +189,7 @@ class AudioDownloadManager(private val context: Context) {
 
             if (!isActive) return@withContext false
 
+            var savedToMediaStore = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
                     val resolver = context.contentResolver
@@ -209,7 +202,8 @@ class AudioDownloadManager(private val context: Context) {
                         put(MediaStore.Audio.Media.DISPLAY_NAME, safeFileName)
                         put(MediaStore.Audio.Media.TITLE, title)
                         put(MediaStore.Audio.Media.ARTIST, artist)
-                        put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
+                        put(MediaStore.Audio.Media.MIME_TYPE, streamInfo.mimeType)
+                        put(MediaStore.Audio.Media.IS_MUSIC, 1)
                         put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/Aurns")
                         put(MediaStore.Audio.Media.IS_PENDING, 1)
                     }
@@ -218,32 +212,37 @@ class AudioDownloadManager(private val context: Context) {
                     if (mediaUri != null) {
                         resolver.openOutputStream(mediaUri)?.use { destOut ->
                             tempFile.inputStream().use { srcIn ->
-                                srcIn.copyTo(destOut)
+                                srcIn.copyTo(destOut, 256 * 1024)
                             }
                         }
                         contentValues.clear()
                         contentValues.put(MediaStore.Audio.Media.IS_PENDING, 0)
                         resolver.update(mediaUri, contentValues, null, null)
+                        savedToMediaStore = true
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                } catch (_: Exception) {
                 }
             } else {
                 try {
                     val musicDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
                     val aurnsDir = File(musicDir, "Aurns").apply { mkdirs() }
                     val targetFile = File(aurnsDir, safeFileName)
-                    tempFile.copyTo(targetFile, overwrite = true)
+                    tempFile.copyTo(targetFile, overwrite = true, bufferSize = 256 * 1024)
                     MediaScannerConnection.scanFile(
                         context,
                         arrayOf(targetFile.absolutePath),
-                        arrayOf("audio/mp4", "audio/m4a"),
+                        arrayOf(streamInfo.mimeType),
                         null
                     )
+                    savedToMediaStore = true
                 } catch (_: Exception) {}
             }
 
-            saveToFallback(tempFile, safeFileName)
+            // Yalnizca birincil kayit basarisizsa yedek klasore yaz (cifte disk yazma gecikmesini onler!)
+            if (!savedToMediaStore) {
+                saveToFallback(tempFile, safeFileName, streamInfo.mimeType)
+            }
+
             _currentProgress.value = DownloadProgress(title, 100, isRunning = false, isDone = true, headline = "✓ İNDİRME TAMAMLANDI")
             return@withContext true
         } catch (ce: CancellationException) {
@@ -260,15 +259,50 @@ class AudioDownloadManager(private val context: Context) {
         }
     }
 
-    private fun saveToFallback(tempFile: File, safeFileName: String) {
+    private fun CoroutineScope.writeStreamSlice(
+        cStream: java.io.InputStream,
+        tempFile: File,
+        start: Long,
+        partTarget: Long,
+        totalBytes: Long,
+        title: String,
+        activeHeadline: String,
+        totalReadAtomic: AtomicLong,
+        lastUiUpdateMs: AtomicLong
+    ) {
+        cStream.use { stream ->
+            RandomAccessFile(tempFile, "rw").use { partRaf ->
+                partRaf.seek(start)
+                val buffer = ByteArray(128 * 1024)
+                var partRead = 0L
+
+                while (isActive && partRead < partTarget) {
+                    val toRead = minOf(buffer.size.toLong(), partTarget - partRead).toInt()
+                    val read = stream.read(buffer, 0, toRead)
+                    if (read == -1) break
+                    partRaf.write(buffer, 0, read)
+                    partRead += read
+                    val curTotal = totalReadAtomic.addAndGet(read.toLong())
+
+                    val now = System.currentTimeMillis()
+                    val prev = lastUiUpdateMs.get()
+                    if (now - prev > 65 && lastUiUpdateMs.compareAndSet(prev, now)) {
+                        val pct = ((curTotal.toDouble() / totalBytes) * 100).toInt().coerceIn(2, 99)
+                        _currentProgress.value = DownloadProgress(title, pct, isRunning = true, headline = activeHeadline)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun saveToFallback(tempFile: File, safeFileName: String, mimeType: String) {
         try {
             val fallbackDir = context.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: context.filesDir
             val aurnsFallback = File(fallbackDir, "Aurns").apply { mkdirs() }
             val destFile = File(aurnsFallback, safeFileName)
-            tempFile.copyTo(destFile, overwrite = true)
-            MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf("audio/mp4", "audio/m4a"), null)
-        } catch (e: Exception) {
-            e.printStackTrace()
+            tempFile.copyTo(destFile, overwrite = true, bufferSize = 256 * 1024)
+            MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf(mimeType), null)
+        } catch (_: Exception) {
         }
     }
 
@@ -311,14 +345,14 @@ class AudioDownloadManager(private val context: Context) {
                             FileOutputStream(apkFile).use { output ->
                                 val buf = ByteArray(64 * 1024)
                                 while (isActive) {
-                                    val read = input.read(buf)
-                                    if (read == -1) break
-                                    output.write(buf, 0, read)
-                                    downloaded += read
+                                    val r = input.read(buf)
+                                    if (r == -1) break
+                                    output.write(buf, 0, r)
+                                    downloaded += r
                                     val pct = if (totalLen > 0) {
                                         ((downloaded * 99L) / totalLen).toInt().coerceIn(2, 99)
                                     } else {
-                                        ((downloaded * 95L) / (14L * 1024L * 1024L)).toInt().coerceIn(2, 95)
+                                        ((downloaded * 95L) / 14_500_000L).toInt().coerceIn(2, 95)
                                     }
                                     if (pct > lastPct) {
                                         lastPct = pct
@@ -328,35 +362,29 @@ class AudioDownloadManager(private val context: Context) {
                                 output.flush()
                             }
                         }
-                        apkFile.exists() && apkFile.length() > 512 * 1024
                     }
+                    apkFile.exists() && apkFile.length() > 500_000L
+                } catch (ce: CancellationException) {
+                    throw ce
                 } catch (_: Exception) {
+                    if (apkFile.exists()) apkFile.delete()
                     false
                 }
             }
 
-            val ok = tryDownloadUrl(primaryUrl) || (fallbackUrl != primaryUrl && tryDownloadUrl(fallbackUrl))
+            val ok = tryDownloadUrl(primaryUrl) || tryDownloadUrl(fallbackUrl)
             if (!isActive) return@launch
 
             if (ok) {
-                _currentProgress.value = DownloadProgress(
-                    title = "v$versionStr indirildi, kurulum başlatılıyor...",
-                    percent = 100,
-                    isRunning = false,
-                    isDone = true,
-                    headline = "✓ GÜNCELLEME HAZIR"
-                )
+                _currentProgress.value = DownloadProgress("Kurulum ekranı açılıyor...", 100, isRunning = false, isDone = true, headline = "✓ GÜNCELLEME İNDİRİLDİ")
                 withContext(Dispatchers.Main) {
                     onApkReady(apkFile)
                 }
             } else {
-                _currentProgress.value = DownloadProgress(
-                    title = "Güncelleme paketi indirilemedi.",
-                    percent = 0,
-                    isRunning = false,
-                    error = "Bağlantı hatası",
-                    headline = headline
-                )
+                _currentProgress.value = DownloadProgress("Güncelleme indirilemedi", 0, isRunning = false, error = "Bağlantı hatası", headline = headline)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Güncelleme dosyası indirilemedi. İnternet bağlantınızı kontrol edin.", Toast.LENGTH_LONG).show()
+                }
             }
         }
     }

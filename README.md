@@ -7,7 +7,7 @@
   **Apple Akıcı Yay Fiziği • Sınırsız Kişilik Canlı Jam Odası • Akıllı Paylaşılan Liste • 4 Kanallı Hızlı İndirici**
 
   <p align="center">
-    <a href="https://github.com/selimakclk/aurns/releases/latest"><img src="https://img.shields.io/badge/Sürüm-v1.4.0-FF416C?style=for-the-badge&logo=github" alt="Sürüm v1.4.0" /></a>
+    <a href="https://github.com/selimakclk/aurns/releases/latest"><img src="https://img.shields.io/badge/Sürüm-v1.4.1-FF416C?style=for-the-badge&logo=github" alt="Sürüm v1.4.1" /></a>
     <img src="https://img.shields.io/badge/PC_RAM-0.5_MB-00C9FF?style=for-the-badge&logo=speedtest" alt="RAM Kullanımı" />
     <img src="https://img.shields.io/badge/PC_Mimari-Saf_C99_&_Win32-92FE9D?style=for-the-badge&logo=c" alt="PC Mimari" />
     <img src="https://img.shields.io/badge/Mobil_Mimari-Kotlin_&_Compose-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white" alt="Mobil Mimari" />
@@ -17,11 +17,11 @@
 
   <p align="center">
     <a href="https://github.com/selimakclk/aurns/releases/latest/download/Aurns.exe">
-      <img src="https://img.shields.io/badge/Windows_İndir-Aurns.exe_(v1.4.0)-FF4B2B?style=for-the-badge&logo=windows&logoColor=white" height="40" alt="Aurns.exe v1.4.0 İndir" />
+      <img src="https://img.shields.io/badge/Windows_İndir-Aurns.exe_(v1.4.1)-FF4B2B?style=for-the-badge&logo=windows&logoColor=white" height="40" alt="Aurns.exe v1.4.1 İndir" />
     </a>
     &nbsp;&nbsp;
     <a href="https://github.com/selimakclk/aurns/releases/latest/download/Aurns.apk">
-      <img src="https://img.shields.io/badge/Android_İndir-Aurns.apk_(v1.4.0)-3DDC84?style=for-the-badge&logo=android&logoColor=white" height="40" alt="Aurns.apk v1.4.0 İndir" />
+      <img src="https://img.shields.io/badge/Android_İndir-Aurns.apk_(v1.4.1)-3DDC84?style=for-the-badge&logo=android&logoColor=white" height="40" alt="Aurns.apk v1.4.1 İndir" />
     </a>
   </p>
 
@@ -33,7 +33,7 @@
 
 Modern masaüstü ve mobil müzik oynatıcılarının çoğu ağır web sarmalayıcıları (**Electron / Chromium**) veya şişkin kütüphaneler kullanır; boşta bile **200 MB – 800 MB** bellek tüketir.
 
-**ΛURNS (`v1.4.0`)**, hem bilgisayarda hem telefonda **piksel piksel birebir aynı (%100 İkiz)** arayüz ve özellik setini en saf yerli (native) mimariyle sunar:
+**ΛURNS (`v1.4.1`)**, hem bilgisayarda hem telefonda **piksel piksel birebir aynı (%100 İkiz)** arayüz ve özellik setini en saf yerli (native) mimariyle sunar:
 * **Bilgisayar (Windows 10/11):** Hiçbir harici ağır kütüphane olmadan **saf C99 ve Win32 API** ile yazılmıştır. **0.05 saniyede açılır** ve Görev Yöneticisi'nde yalnızca **~0.5 MB RAM** tüketir.
 * **Telefon (Android 8.0+):** **Saf Kotlin, Jetpack Compose ve Media3 ExoPlayer** mimarisiyle 60 FPS akıcılıkta çalışır; arka planda çalma, bildirim kartı ve kilit ekranı kontrollerini tam destekler.
 * **%100 İkiz Tasarım & Özellik Eşitliği:** Obsidian & Sunset-Neon renk paleti, buzlu cam yan çekmece, her zaman görünür alt oynatıcı çubuğu, 3 renkli ilerleme çubuğu, Aura durum noktaları, sınırsız kişilik canlı Jam odaları ve uygulama içi canlı güncelleyici her iki platformda birebir aynıdır.
@@ -67,7 +67,7 @@ Modern masaüstü ve mobil müzik oynatıcılarının çoğu ağır web sarmalay
 
 ---
 
-## ✨ Öne Çıkan Özellikler (`v1.4.0`)
+## ✨ Öne Çıkan Özellikler (`v1.4.1`)
 
 ### 1. 🎧 Sınırsız Kişilik Canlı Jam Odaları & Milisaniye Yakalama (Seek-to-Live)
 * **Sınırsız Katılımcı:** İki kişi sınırı olmadan istediğiniz kadar arkadaşınızı aynı Jam odasına (`+ Davet`) çağırabilir, bilgisayar ve telefon kullanıcılarıyla aynı odada buluşabilirsiniz.

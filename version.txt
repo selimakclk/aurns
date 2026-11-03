@@ -1,6 +1,6 @@
-1.4.0
+1.4.1
 https://raw.githubusercontent.com/selimakclk/aurns/main/Aurns.exe
-- %100 İkiz Platform Eşitliği (Bilgisayar & Telefon Birebir Aynı): Arayüz renkleri, sütun başlıkları, her zaman görünür alt oynatıcı, Sunset-Neon 3 renkli ilerleme çubuğu, aura noktaları ve tüm menüler piksel piksel eşitlendi.
-- Uygulama İçi Canlı Güncelleyici (PC & Android): Açılışta otomatik sürüm denetimi ve hem bilgisayarda hem telefonda uygulama içinden yüzdeli canlı güncelleme indirme/kurma.
-- Sınırsız Kişilik Canlı Jam Odası & Satır İçi Etiket Düzenleme: Sınırsız katılımcılı canlı Jam odası, eksik şarkıda milisaniye yakalama ve kart içi anında isim düzenleme.
-- Türkçe Karakter Duyarsız Akıllı Arama & Paylaşılan Çalma Listesi (.m3u8 / .aurns).
+- Çift Brokerlı Eşzamanlı Ağ Motoru & Kesintisiz Arkadaş Ekleme: Bilgisayar ve telefonda çift sunucu (TLS 8883 + TCP 1883) ve kalıcı dizin/posta kutusu mimarisiyle 'kullanıcı bulunamadı' sorunu kökten giderildi; ekran kapalı veya arka planda olsa bile arkadaşlık istekleri anında iletilir.
+- Kalıcı Kullanıcı Adı & Değişmez Sabit #Etiket Kimliği: Seçtiğiniz kullanıcı adı kalıcı olarak korunur, dilediğiniz zaman düzenlenebilir; cihaza kilitli #numara etiketi ise hiçbir zaman değişmez.
+- 6 Kanallı Ultra Hızlı Mobil İndirici: YouTube hız kısıtlamasını aşan 6 paralel kanal (&range) ve doğrudan M4A ses çözümleyicisi ile mobilde indirme hızı katlandı.
+- Kusursuz Sınırsız Kişilik Canlı Jam Odası: Mobilde her zaman görünür Jam butonu, kilit ekranı/Wi-Fi uyku kilidi ve eksik parçada milisaniyelik canlı yakalama (Seek-to-Live) ile PC <-> Mobil Jam tam senkronize hale getirildi.

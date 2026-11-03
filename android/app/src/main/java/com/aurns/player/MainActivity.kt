@@ -97,7 +97,7 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
-private const val APP_VERSION = "1.4.0"
+private const val APP_VERSION = "1.4.1"
 private const val VERSION_CHECK_URL = "https://raw.githubusercontent.com/selimakclk/aurns/main/version.txt"
 private const val APK_RELEASE_LATEST_URL = "https://github.com/selimakclk/aurns/releases/latest/download/Aurns.apk"
 
@@ -1077,6 +1077,14 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Sistem bu dosyanın silinmesine izin vermedi.", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Silme hatası: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        friendsManager.requestAllStatuses()
+        if (friendsManager.jamState.value.isActive && jamAutoDlJob?.isActive != true) {
+            friendsManager.requestJamPartnerState()
         }
     }
 
@@ -2253,7 +2261,7 @@ fun FriendsPanelScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "KULLANICI ADINI DÜZENLE (ETİKET SABİT)",
+                                text = "ADINI DÜZENLE (#${myTag.substringAfter("#", "0000")} SABİT)",
                                 color = AccentOrange,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -2427,6 +2435,66 @@ fun FriendsPanelScreen(
                 }
             }
 
+            // Gelen Canlı Jam Daveti Kartı (Arkadaşlar paneli açıkken de doğrudan görünür!)
+            if (jamState.hasIncomingInvite) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF221328),
+                    border = BorderStroke(1.dp, Brush.horizontalGradient(listOf(AccentOrange, AccentPink))),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "🎧 CANLI JAM DAVETİ",
+                                color = AccentOrange,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.6.sp
+                            )
+                            Text(
+                                text = "${jamState.inviterName.ifBlank { jamState.inviterTag }} seni ortak dinlemeye çağırıyor!",
+                                color = TextWhite,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Brush.horizontalGradient(listOf(AccentOrange, AccentPink)))
+                                .clickable { friendsManager.acceptJamInvite() }
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("Katıl", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            onClick = { friendsManager.rejectJamInvite() },
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFF28162C),
+                            border = BorderStroke(0.5.dp, BorderDark)
+                        ) {
+                            Text(
+                                text = "✕",
+                                color = TextDim,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             // Aktif Jam Odası Katılımcı Özeti Kartı
             if (jamState.isActive || jamState.isInviting) {
                 Spacer(modifier = Modifier.height(8.dp))
@@ -2532,7 +2600,7 @@ fun FriendsPanelScreen(
                     } else {
                         val roomOpen = jamState.isActive || jamState.isInviting
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
-                            items(friends, key = { it.tag }) { friend ->
+                            items(friends, key = { FriendsManager.extractTagId(it.tag).ifBlank { it.tag } }) { friend ->
                                 val inRoom = jamState.isFriendInRoom(friend.tag)
                                 val isInvitingOnly = jamState.isInviting && !jamState.isActive && inRoom
                                 FriendRowItem(
@@ -2544,6 +2612,7 @@ fun FriendsPanelScreen(
                                         if (isInvitingOnly && jamState.members.isEmpty()) {
                                             friendsManager.leaveJamRoom()
                                         } else if (!inRoom) {
+                                            friendsManager.requestAllStatuses()
                                             friendsManager.inviteFriendToJam(friend.tag, friend.name)
                                             Toast.makeText(
                                                 context,
@@ -2651,7 +2720,7 @@ fun FriendsPanelScreen(
                                         addTagInput = ""
                                     } else {
                                         checkStatusMessage = res.exceptionOrNull()?.message
-                                            ?: "Böyle bir kullanıcı yok veya şu an çevrimdışı!"
+                                            ?: "Böyle bir kullanıcı bulunamadı!"
                                         isCheckError = true
                                     }
                                 }
@@ -2820,27 +2889,41 @@ fun FriendRowItem(
                 )
             }
 
-            if (friend.isOnline || isInJamRoom) {
-                Surface(
-                    onClick = onInviteJam,
-                    shape = RoundedCornerShape(7.dp),
-                    color = if (isInJamRoom) Color(0xFF231028) else AccentOrange,
-                    border = BorderStroke(1.dp, if (isInJamRoom) AccentPink else AccentOrange),
-                    modifier = Modifier.padding(end = 4.dp)
-                ) {
-                    Text(
-                        text = when {
-                            isInvitingWaiting -> "Bekliyor"
-                            isInJamRoom -> "Odada"
-                            isRoomOpen -> "+ Davet"
-                            else -> "Jam"
-                        },
-                        color = if (isInJamRoom) AccentPink else Color(0xFF050505),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
-                    )
-                }
+            // Jam Butonu Her Zaman Görünür ve Tıklanabilir (Windows src/main.c:2824-2833 ile %100 Birebir)
+            Surface(
+                onClick = onInviteJam,
+                shape = RoundedCornerShape(7.dp),
+                color = when {
+                    isInJamRoom -> Color(0xFF231028)
+                    friend.isOnline -> AccentOrange
+                    else -> Color(0xFF222226)
+                },
+                border = BorderStroke(
+                    1.dp,
+                    when {
+                        isInJamRoom -> AccentPink
+                        friend.isOnline -> AccentOrange
+                        else -> BorderDark
+                    }
+                ),
+                modifier = Modifier.padding(end = 4.dp)
+            ) {
+                Text(
+                    text = when {
+                        isInvitingWaiting -> "Bekliyor"
+                        isInJamRoom -> "Odada"
+                        isRoomOpen -> "+ Davet"
+                        else -> "Jam"
+                    },
+                    color = when {
+                        isInJamRoom -> AccentPink
+                        friend.isOnline -> Color(0xFF050505)
+                        else -> TextDim
+                    },
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                )
             }
 
             IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {

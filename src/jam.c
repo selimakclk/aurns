@@ -53,12 +53,7 @@ static void FormatRoomTopic(const char *jamId, char *outTopic, int maxLen) {
 
 static void PublishToPeerInbox(const wchar_t *peerTag, const char *payload) {
     if (!peerTag || !peerTag[0] || !payload) return;
-    char peerKey[64] = {0};
-    Network_TagToTopicKeyW(peerTag, peerKey, sizeof(peerKey));
-    if (!peerKey[0]) return;
-    char inbox[160];
-    snprintf(inbox, sizeof(inbox), "seloplayer/u/%s", peerKey);
-    Network_Publish(inbox, payload);
+    Friends_PublishToPeer(peerTag, payload);
 }
 
 static void PublishToRoom(const char *payload) {
@@ -71,7 +66,7 @@ static void PublishToRoom(const char *payload) {
 static int FindMemberIndex(const wchar_t *tag) {
     if (!tag || !tag[0]) return -1;
     for (int i = 0; i < g_jam.memberCount; i++) {
-        if (_wcsicmp(g_jam.members[i].tag, tag) == 0) return i;
+        if (Friends_SameUserTag(g_jam.members[i].tag, tag)) return i;
     }
     return -1;
 }
@@ -81,10 +76,12 @@ static BOOL UpsertMember(const wchar_t *tag, const wchar_t *name) {
     if (!tag || !tag[0]) return FALSE;
     wchar_t myTag[32] = {0};
     Friends_GetMyTag(myTag, 32);
-    if (myTag[0] && _wcsicmp(tag, myTag) == 0) return FALSE;
+    if (myTag[0] && Friends_SameUserTag(tag, myTag)) return FALSE;
 
     int idx = FindMemberIndex(tag);
     if (idx >= 0) {
+        wcsncpy(g_jam.members[idx].tag, tag, 31);
+        g_jam.members[idx].tag[31] = L'\0';
         if (name && name[0]) {
             wcsncpy(g_jam.members[idx].name, name, 63);
             g_jam.members[idx].name[63] = L'\0';
@@ -178,7 +175,7 @@ int Jam_GetMemberCount(void) {
 BOOL Jam_IsFriendInJam(const wchar_t *friendTag) {
     if (g_jam.state == JAM_STATE_NONE || !friendTag || !friendTag[0]) return FALSE;
     if (FindMemberIndex(friendTag) >= 0) return TRUE;
-    if (g_jam.state == JAM_STATE_INVITING && _wcsicmp(g_jam.lastInvitedTag, friendTag) == 0) return TRUE;
+    if (g_jam.state == JAM_STATE_INVITING && Friends_SameUserTag(g_jam.lastInvitedTag, friendTag)) return TRUE;
     return FALSE;
 }
 
@@ -386,6 +383,7 @@ void Jam_AcceptInvite(void) {
     char askPayload[256];
     snprintf(askPayload, sizeof(askPayload), "JAM_ASK|%s|%s", uMyTag, g_jam.jamId);
     PublishToPeerInbox(inviterTag, askPayload);
+    PublishToRoom(askPayload);
 }
 
 void Jam_RejectInvite(void) {
@@ -461,6 +459,7 @@ void Jam_SendStateToPeer(const wchar_t *targetTag, BOOL isPlaying, const wchar_t
     char payload[640];
     BuildStatePayload(payload, sizeof(payload), isPlaying, trackTitle, ytId, posMs);
     PublishToPeerInbox(targetTag, payload);
+    PublishToRoom(payload);
 }
 
 static void BroadcastPosFlag(int playFlag, int posMs) {
@@ -556,17 +555,12 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
     Friends_GetMyTag(myTag, 32);
     Friends_GetMyName(myName, 64);
 
-    char myKey[64] = {0};
-    Network_TagToTopicKeyW(myTag, myKey, sizeof(myKey));
-    char myInbox[160];
-    snprintf(myInbox, sizeof(myInbox), "seloplayer/u/%s", myKey);
-
     char roomTopic[160] = {0};
     if (g_jam.jamId[0]) {
         FormatRoomTopic(g_jam.jamId, roomTopic, sizeof(roomTopic));
     }
 
-    BOOL isInbox = (_stricmp(topic, myInbox) == 0);
+    BOOL isInbox = Friends_IsMyInboxTopic(topic);
     BOOL isRoom  = (roomTopic[0] && _stricmp(topic, roomTopic) == 0);
     if (!isInbox && !isRoom) return;
 
@@ -580,7 +574,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
             strncpy(jamId, cur, sizeof(jamId) - 1);
             wchar_t wTag[32] = {0};
             MultiByteToWideChar(CP_UTF8, 0, fTag, -1, wTag, 31);
-            if (!wTag[0] || !jamId[0] || _wcsicmp(wTag, myTag) == 0) return;
+            if (!wTag[0] || !jamId[0] || Friends_SameUserTag(wTag, myTag)) return;
             // Zaten bu odadaysak tekrar bildirim cikarma
             if (g_jam.state != JAM_STATE_NONE && strcmp(g_jam.jamId, jamId) == 0) return;
 
@@ -606,7 +600,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
             wchar_t wTag[32] = {0}, wName[64] = {0};
             MultiByteToWideChar(CP_UTF8, 0, fTag, -1, wTag, 31);
             MultiByteToWideChar(CP_UTF8, 0, fName, -1, wName, 63);
-            if (!wTag[0] || _wcsicmp(wTag, myTag) == 0) return;
+            if (!wTag[0] || Friends_SameUserTag(wTag, myTag)) return;
 
             BOOL isNew = UpsertMember(wTag, wName);
             g_jam.state = JAM_STATE_ACTIVE;
@@ -625,6 +619,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
                 char herePayload[320];
                 snprintf(herePayload, sizeof(herePayload), "JAM_HERE|%s|%s|%s", uMyTag, uMyName, g_jam.jamId);
                 PublishToPeerInbox(wTag, herePayload);
+                PublishToRoom(herePayload);
 
                 // Calan bir sarkimiz varsa yeni katilana anlik konumu tekil gonder
                 if (!g_jam.isDownloading) {
@@ -648,7 +643,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
             wchar_t wTag[32] = {0}, wName[64] = {0};
             MultiByteToWideChar(CP_UTF8, 0, fTag, -1, wTag, 31);
             MultiByteToWideChar(CP_UTF8, 0, fName, -1, wName, 63);
-            if (!wTag[0] || _wcsicmp(wTag, myTag) == 0) return;
+            if (!wTag[0] || Friends_SameUserTag(wTag, myTag)) return;
 
             UpsertMember(wTag, wName);
             g_jam.state = JAM_STATE_ACTIVE;
@@ -679,7 +674,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
             if (g_jam.state != JAM_STATE_NONE && strcmp(g_jam.jamId, cur) == 0) {
                 wchar_t wTag[32] = {0};
                 MultiByteToWideChar(CP_UTF8, 0, fTag, -1, wTag, 31);
-                if (!wTag[0] || _wcsicmp(wTag, myTag) == 0) return;
+                if (!wTag[0] || Friends_SameUserTag(wTag, myTag)) return;
 
                 RemoveMember(wTag);
                 // Odada baska katilimci kalmadiysa ve bekleyen davet yoksa odayi kapat
@@ -699,7 +694,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
             if (g_jam.state == JAM_STATE_ACTIVE && strcmp(g_jam.jamId, cur) == 0) {
                 wchar_t wTag[32] = {0};
                 MultiByteToWideChar(CP_UTF8, 0, fTag, -1, wTag, 31);
-                if (!wTag[0] || _wcsicmp(wTag, myTag) == 0) return;
+                if (!wTag[0] || Friends_SameUserTag(wTag, myTag)) return;
                 UpsertMember(wTag, NULL);
                 if (!g_jam.isDownloading) {
                     EnqueueAskTarget(wTag);
@@ -722,7 +717,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
             if (g_jam.state != JAM_STATE_NONE && strcmp(g_jam.jamId, jamId) == 0) {
                 wchar_t wTag[32] = {0};
                 MultiByteToWideChar(CP_UTF8, 0, fTag, -1, wTag, 31);
-                if (!wTag[0] || _wcsicmp(wTag, myTag) == 0) return;
+                if (!wTag[0] || Friends_SameUserTag(wTag, myTag)) return;
 
                 UpsertMember(wTag, NULL);
                 g_jam.state = JAM_STATE_ACTIVE;
@@ -756,7 +751,7 @@ void Jam_HandleNetworkMessage(const char *topic, const char *payload) {
             if (g_jam.state != JAM_STATE_NONE && strcmp(g_jam.jamId, jamId) == 0) {
                 wchar_t wTag[32] = {0};
                 MultiByteToWideChar(CP_UTF8, 0, fTag, -1, wTag, 31);
-                if (!wTag[0] || _wcsicmp(wTag, myTag) == 0) return;
+                if (!wTag[0] || Friends_SameUserTag(wTag, myTag)) return;
 
                 UpsertMember(wTag, NULL);
                 g_jam.state = JAM_STATE_ACTIVE;

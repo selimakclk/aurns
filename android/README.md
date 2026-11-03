@@ -1,11 +1,11 @@
-# 📱 ΛURNS Android (`v1.4.0`)
+# 📱 ΛURNS Android (`v1.4.1`)
 ### %100 İkiz Platform Deneyimi • Sınırsız Kişilik Canlı Jam • 4 Kanallı Hızlı İndirici
 
-Bu modül, **ΛURNS (`v1.4.0`)** müzik oynatıcısının resmi Android uygulamasıdır ve masaüstü Windows (`src/`) sürümüyle **piksel piksel %100 aynı arayüz ve özellik eşitliğine** sahiptir.
+Bu modül, **ΛURNS (`v1.4.1`)** müzik oynatıcısının resmi Android uygulamasıdır ve masaüstü Windows (`src/`) sürümüyle **piksel piksel %100 aynı arayüz ve özellik eşitliğine** sahiptir.
 
 ---
 
-## ⚡ Öne Çıkan Özellikler (`v1.4.0`)
+## ⚡ Öne Çıkan Özellikler (`v1.4.1`)
 
 1. **%100 Masaüstü İkiz Arayüzü (Obsidian & Sunset-Neon):**
    * `#050505` Obsidian zemin, `#FF925C` / `#FF6E50` / `#F044B8` 3 renkli Sunset-Neon ilerleme çubuğu.

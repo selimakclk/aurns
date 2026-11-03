@@ -28,25 +28,30 @@ void Friends_GetMyTag(wchar_t *buf, int maxLen);
 void Friends_GetMyName(wchar_t *buf, int maxLen);
 void Friends_SetMyName(const wchar_t *newName);
 
+BOOL Friends_SameUserTag(const wchar_t *tagA, const wchar_t *tagB);
+BOOL Friends_IsMyInboxTopic(const char *topic);
+void Friends_PublishToPeer(const wchar_t *peerTag, const char *payload);
+void Friends_SubscribeMyChannels(void);
+void Friends_OnNetworkConnected(void);
+
 int  Friends_GetFriendCount(void);
 const FriendItem* Friends_GetFriend(int index);
 
 int  Friends_GetPendingCount(void);
 const FriendRequest* Friends_GetPending(int index);
 
-// Kullanici arama / varlik kontrolu
+// Kullanici arama / varlik kontrolu (canli PING + kalici REG kaydi)
 void Friends_ProbeUser(const wchar_t *targetTag);
 BOOL Friends_CheckUserFound(const wchar_t *targetTag);
+void Friends_CancelProbe(void);
 
 BOOL Friends_SendRequest(const wchar_t *targetTag);
 BOOL Friends_AcceptRequest(const wchar_t *targetTag);
 BOOL Friends_RejectRequest(const wchar_t *targetTag);
 BOOL Friends_Remove(const wchar_t *targetTag);
 
-// Yerel oynatma bilgisini bellekte tutar (ag paketi gondermez, sifir yuk!)
 void Friends_SetLocalTrackState(BOOL isPlaying, const wchar_t *trackTitle);
 
-// Yalnizca Arkadaslar paneli acildiginda veya Jam aktifken cagirilir
 void Friends_RequestAllStatuses(void);
 void Friends_NotifyOffline(void);
 void Friends_CheckTimeouts(void);

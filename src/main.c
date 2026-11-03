@@ -944,10 +944,7 @@ static void EnsureSocialNetworkStarted(void) {
     char myInitKey[64] = {0};
     Network_TagToTopicKeyW(myInitTag, myInitKey, sizeof(myInitKey));
     Network_Init(g_hWnd, myInitKey);
-
-    char myInboxTopic[160];
-    snprintf(myInboxTopic, sizeof(myInboxTopic), "seloplayer/u/%s", myInitKey);
-    Network_Subscribe(myInboxTopic);
+    Friends_SubscribeMyChannels();
 }
 
 static void UpdateTimerSchedule(HWND hWnd) {
@@ -1673,7 +1670,7 @@ static void SubmitFriendRequest(HWND hWnd) {
 
     wchar_t inTag[64] = {0};
     GetWindowTextW(g_hFriendAddEdit, inTag, 63);
-    StrTrimW(inTag, L" \t\r\n");
+    StrTrimW(inTag, L" \t\r\n@");
     int tlen = (int)wcslen(inTag);
 
     if (tlen == 0) {
@@ -1681,15 +1678,18 @@ static void SubmitFriendRequest(HWND hWnd) {
         InvalidateRect(hWnd, NULL, FALSE);
         return;
     }
-    if (wcschr(inTag, L'#') == NULL) {
-        wcscpy(g_friendAddMsg, L"Etiket '#' içermelidir (Örn: Selim#8421)");
+
+    char parsedId[16] = {0};
+    Network_ExtractTagIdW(inTag, parsedId, sizeof(parsedId));
+    if (wcschr(inTag, L'#') == NULL && strlen(parsedId) < 3) {
+        wcscpy(g_friendAddMsg, L"Etiket '#' ve numara içermelidir (Örn: Selim#8421)");
         InvalidateRect(hWnd, NULL, FALSE);
         return;
     }
 
     wchar_t myTag[32] = {0};
     Friends_GetMyTag(myTag, 32);
-    if (_wcsicmp(inTag, myTag) == 0) {
+    if (Friends_SameUserTag(inTag, myTag)) {
         wcscpy(g_friendAddMsg, L"Kendinize istek gönderemezsiniz.");
         InvalidateRect(hWnd, NULL, FALSE);
         return;
@@ -1697,14 +1697,14 @@ static void SubmitFriendRequest(HWND hWnd) {
 
     for (int i = 0; i < Friends_GetFriendCount(); i++) {
         const FriendItem *f = Friends_GetFriend(i);
-        if (f && _wcsicmp(f->tag, inTag) == 0) {
+        if (f && Friends_SameUserTag(f->tag, inTag)) {
             wcscpy(g_friendAddMsg, L"Bu kullanıcı zaten arkadaş listenizde.");
             InvalidateRect(hWnd, NULL, FALSE);
             return;
         }
     }
 
-    // Kullanicinin var olup olmadigini ag uzerinden sorgula
+    EnsureSocialNetworkStarted();
     g_isCheckingUser = TRUE;
     g_checkUserStartTick = GetTickCount();
     wcsncpy(g_checkTargetTag, inTag, 63);
@@ -2730,10 +2730,19 @@ static void RenderUI(HDC hdc, const RECT *clientRc) {
                 DrawUiText(hdc, myTag, &rcMyTag, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
 
-            RECT rcMyLbl = { rcMyCard.left + S(50), rcMyCard.top + S(8),  rcEditName.left - S(6), rcMyCard.top + S(26) };
+            RECT rcMyLbl = { rcMyCard.left + S(50), rcMyCard.top + S(8),  rcEditName.left - S(6), rcMyCard.top + S(24) };
             SelectObject(hdc, g_hFontMicro);
-            SetTextColor(hdc, COLOR_TEXT_DIM);
-            DrawUiText(hdc, L"SENİN ETİKETİN", &rcMyLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (g_isEditingMyName) {
+                const wchar_t *hashP = wcschr(myTag, L'#');
+                wchar_t editHdr[64];
+                _snwprintf(editHdr, 63, L"ADINI DÜZENLE (%s SABİT)", hashP ? hashP : L"#ETİKET");
+                editHdr[63] = L'\0';
+                SetTextColor(hdc, COLOR_ACCENT_ORANGE);
+                DrawUiText(hdc, editHdr, &rcMyLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                SetTextColor(hdc, COLOR_TEXT_DIM);
+                DrawUiText(hdc, L"SENİN ETİKETİN", &rcMyLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
 
             RECT rcTabTray = { offX + S(12), headerH + S(106), offX + sbW - S(12), headerH + S(140) };
             DrawSmoothRoundRect(&rcTabTray, S(10), RGB(16, 16, 16), 255, COLOR_BORDER, 180);
@@ -3463,11 +3472,14 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                         g_isCheckingUser = FALSE;
                         UpdateTimerSchedule(hWnd);
                         InvalidateRect(hWnd, NULL, FALSE);
-                    } else if (now - g_checkUserStartTick > 2200) {
-                        wcscpy(g_friendAddMsg, L"Böyle bir kullanıcı yok veya çevrimdışı!");
+                    } else if (now - g_checkUserStartTick > 3600) {
+                        Friends_CancelProbe();
+                        wcscpy(g_friendAddMsg, L"Böyle bir kullanıcı bulunamadı!");
                         g_isCheckingUser = FALSE;
                         UpdateTimerSchedule(hWnd);
                         InvalidateRect(hWnd, NULL, FALSE);
+                    } else if (now - g_checkUserStartTick >= 1400 && now - g_checkUserStartTick < 1650) {
+                        Friends_ProbeUser(g_checkTargetTag);
                     }
                 }
 
@@ -3540,6 +3552,7 @@ static LRESULT CALLBACK MainWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
             NetEvent *evt = (NetEvent*)wParam;
             if (evt) {
                 if (evt->type == NET_EVENT_CONNECTED) {
+                    Friends_OnNetworkConnected();
                     if (IsSocialRefreshActive()) {
                         TriggerImmediateFriendsRefresh();
                     }
