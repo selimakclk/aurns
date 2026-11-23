@@ -1,0 +1,73 @@
+name: Aurns
+options:
+  bundleIdPrefix: com.aurns
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.4"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.7.9"
+    CURRENT_PROJECT_VERSION: "26"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+targets:
+  Aurns:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Aurns
+        excludes:
+          - "**/*.md"
+    info:
+      path: Aurns/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aurns.player
+        PRODUCT_NAME: Aurns
+        INFOPLIST_FILE: Aurns/Info.plist
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+          ENABLE_TESTABILITY: "YES"
+          STRIP_INSTALLED_PRODUCT: "NO"
+          DEPLOYMENT_POSTPROCESSING: "NO"
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: "-Osize"
+          DEAD_CODE_STRIPPING: "YES"
+          STRIP_INSTALLED_PRODUCT: "YES"
+          DEPLOYMENT_POSTPROCESSING: "YES"
+
+  AurnsTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: AurnsTests
+    dependencies:
+      - target: Aurns
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aurns.player.tests
+        GENERATE_INFOPLIST_FILE: "YES"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Aurns.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Aurns"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  Aurns:
+    build:
+      targets:
+        Aurns: all
+        AurnsTests: [test]
+    test:
+      config: Debug
+      targets:
+        - AurnsTests

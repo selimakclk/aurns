@@ -1,0 +1,100 @@
+name: Build & Test Aurns iOS (.ipa)
+
+on:
+  push:
+    branches: [ "main", "ios" ]
+    paths:
+      - "ios/**"
+      - ".github/workflows/build-ios.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    name: Test & Build Unsigned Aurns iOS IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Read Version from ios/Aurns/Info.plist
+        run: |
+          RAW_VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" ios/Aurns/Info.plist | tr -d '\r\n ')
+          echo "RAW_VER=${RAW_VER}" >> "$GITHUB_ENV"
+          echo "APP_TAG=v${RAW_VER#v}" >> "$GITHUB_ENV"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        working-directory: ./ios
+        run: xcodegen generate
+
+      - name: Run XCTest Unit Suite on iOS Simulator
+        working-directory: ./ios
+        run: |
+          SIM_ID=$(xcrun simctl list devices available iPhone -j | python3 -c "import sys,json; devs=[d for r,ds in json.load(sys.stdin)['devices'].items() if 'iOS' in r for d in ds if d.get('isAvailable')]; print(devs[0]['udid'] if devs else '')")
+          echo "Using Simulator UDID: ${SIM_ID}"
+          if [ -n "${SIM_ID}" ]; then
+            xcodebuild test \
+              -project Aurns.xcodeproj \
+              -scheme Aurns \
+              -destination "platform=iOS Simulator,id=${SIM_ID}" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO
+          else
+            xcodebuild test \
+              -project Aurns.xcodeproj \
+              -scheme Aurns \
+              -destination "generic/platform=iOS Simulator" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO
+          fi
+
+      - name: Build Unsigned Release iOS App (.app)
+        working-directory: ./ios
+        run: |
+          xcodebuild build \
+            -project Aurns.xcodeproj \
+            -scheme Aurns \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package Unsigned .ipa (SideStore / AltStore / Sideloadly)
+        working-directory: ./ios
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/Aurns.app"
+          test -d "${APP_PATH}"
+          rm -rf Payload ../Aurns-iOS.ipa
+          mkdir -p Payload
+          cp -R "${APP_PATH}" Payload/Aurns.app
+          zip -r -q -y ../Aurns-iOS.ipa Payload
+          ls -lh ../Aurns-iOS.ipa
+
+      - name: Upload Aurns-iOS.ipa as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aurns-iOS-${{ env.APP_TAG }}
+          path: Aurns-iOS.ipa
+          retention-days: 30
+
+      - name: Attach Aurns-iOS.ipa to GitHub Release (${{ env.APP_TAG }})
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ env.APP_TAG }}" >/dev/null 2>&1; then
+            gh release upload "${{ env.APP_TAG }}" Aurns-iOS.ipa --clobber
+          else
+            gh release create "${{ env.APP_TAG }}" Aurns-iOS.ipa \
+              --title "${{ env.APP_TAG }} — ΛURNS (iOS)" \
+              --notes "ΛURNS ${{ env.APP_TAG }} iOS (.ipa) — SideStore, AltStore veya Sideloadly ile kurulabilir." \
+              --latest
+          fi
