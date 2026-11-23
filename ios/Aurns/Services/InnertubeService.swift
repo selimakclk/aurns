@@ -186,26 +186,86 @@ actor InnertubeResolver {
         return resolved
     }
 
+    private func buildCleanSpotifyQueries(_ raw: String) -> (primary: String, songOnly: String) {
+        var artist = ""
+        var songRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let dash = songRaw.range(of: " - ") {
+            artist = String(songRaw[..<dash.lowerBound]).trimmingCharacters(in: .whitespaces)
+            songRaw = String(songRaw[dash.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        if let comma = artist.firstIndex(of: ",") {
+            artist = String(artist[..<comma]).trimmingCharacters(in: .whitespaces)
+        }
+        var cleanSong = songRaw
+        if let rxP = try? NSRegularExpression(pattern: "\\([^)]*\\)|\\[[^\\]]*\\]") {
+            cleanSong = rxP.stringByReplacingMatches(in: cleanSong, range: NSRange(cleanSong.startIndex..., in: cleanSong), withTemplate: " ")
+        }
+        cleanSong = cleanSong.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        if cleanSong.isEmpty { cleanSong = songRaw }
+        let primary = artist.isEmpty ? cleanSong : "\(artist) \(cleanSong)"
+        return (primary, cleanSong)
+    }
+
+    private func parseDurationTextSec(_ text: String) -> Int {
+        let parts = text.trimmingCharacters(in: .whitespaces).split(separator: ":").compactMap { Int($0) }
+        if parts.count == 2 { return parts[0] * 60 + parts[1] }
+        if parts.count == 3 { return parts[0] * 3600 + parts[1] * 60 + parts[2] }
+        return 0
+    }
+
     func resolveSearchToVideoId(query: String) async -> String? {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return nil }
         if let direct = MusicLibraryCore.extractYtIdFromUrl(clean) { return direct }
         let key = clean.lowercased()
         if let cached = searchIdCache[key] { return cached }
-        let hits = await search(query: clean)
-        guard let vid = hits.first?.videoId, MusicLibraryCore.isValidYtId(vid) else { return nil }
+        let (qPrimary, qSong) = buildCleanSpotifyQueries(clean)
+        var hits = await search(query: qPrimary.isEmpty ? clean : qPrimary)
+        if hits.isEmpty && !qSong.isEmpty && qSong.caseInsensitiveCompare(qPrimary) != .orderedSame {
+            hits = await search(query: qSong)
+        }
+        let picked = hits.first(where: { (45...900).contains(parseDurationTextSec($0.durationText)) }) ?? hits.first
+        guard let vid = picked?.videoId, MusicLibraryCore.isValidYtId(vid) else { return nil }
         if searchIdCache.count > 64 { searchIdCache.removeAll() }
         searchIdCache[key] = vid
         return vid
+    }
+
+    func resolvePlayableStreamForQuery(query: String) async -> (videoId: String, stream: StreamInfo)? {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return nil }
+        let key = clean.lowercased()
+        if let cachedVid = searchIdCache[key] {
+            if let st = await resolveAudioStream(videoId: cachedVid), st.fileExt == "m4a" {
+                return (cachedVid, st)
+            }
+            invalidateCachedStream(videoId: cachedVid)
+            searchIdCache.removeValue(forKey: key)
+        }
+        let (qPrimary, qSong) = buildCleanSpotifyQueries(clean)
+        var hits = await search(query: qPrimary.isEmpty ? clean : qPrimary)
+        if hits.isEmpty && !qSong.isEmpty && qSong.caseInsensitiveCompare(qPrimary) != .orderedSame {
+            hits = await search(query: qSong)
+        }
+        guard !hits.isEmpty else { return nil }
+        let fullLen = hits.filter { (45...900).contains(parseDurationTextSec($0.durationText)) }
+        let others = hits.filter { !(45...900).contains(parseDurationTextSec($0.durationText)) }
+        for cand in (fullLen + others).prefix(4) {
+            guard MusicLibraryCore.isValidYtId(cand.videoId) else { continue }
+            if let st = await resolveAudioStream(videoId: cand.videoId), st.fileExt == "m4a" {
+                if searchIdCache.count > 64 { searchIdCache.removeAll() }
+                searchIdCache[key] = cand.videoId
+                return (cand.videoId, st)
+            }
+        }
+        return nil
     }
 
     func prefetchSearchTitle(query: String) {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         Task {
-            if let vid = await resolveSearchToVideoId(query: clean) {
-                _ = await resolveAudioStream(videoId: vid)
-            }
+            _ = await resolvePlayableStreamForQuery(query: clean)
         }
     }
 

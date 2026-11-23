@@ -172,21 +172,28 @@ final class AppCoordinator: ObservableObject {
             guard let self else { return }
             defer { if self.streamingVideoId == marker { self.streamingVideoId = nil } }
 
-            let resolvedVid: String?
-            if let vid = parsed.ytId {
-                resolvedVid = vid
+            let vid: String
+            let info: StreamInfo
+            if let directVid = parsed.ytId {
+                var st = await InnertubeResolver.shared.resolveAudioStream(videoId: directVid)
+                if st == nil {
+                    st = await InnertubeResolver.shared.resolveAudioStream(videoId: directVid, bypassCache: true)
+                }
+                guard let resolved = st else {
+                    self.showToast("Çevrimiçi akış açılamadı, tekrar deneyin")
+                    return
+                }
+                vid = directVid
+                info = resolved
             } else {
-                resolvedVid = await InnertubeResolver.shared.resolveSearchToVideoId(query: parsed.title)
+                guard let res = await InnertubeResolver.shared.resolvePlayableStreamForQuery(query: parsed.title) else {
+                    self.showToast("Parça çevrimiçi akış olarak açılamadı")
+                    return
+                }
+                vid = res.videoId
+                info = res.stream
             }
-            guard let vid = resolvedVid else {
-                self.showToast("Parça çevrimiçi bulunamadı")
-                return
-            }
-            var stream = await InnertubeResolver.shared.resolveAudioStream(videoId: vid)
-            if stream == nil {
-                stream = await InnertubeResolver.shared.resolveAudioStream(videoId: vid, bypassCache: true)
-            }
-            guard let info = stream, let url = URL(string: info.url) else {
+            guard let url = URL(string: info.url) else {
                 self.showToast("Çevrimiçi akış açılamadı, tekrar deneyin")
                 return
             }

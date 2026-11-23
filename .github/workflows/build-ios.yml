@@ -1,11 +1,6 @@
 name: Build & Test Aurns iOS (.ipa)
 
 on:
-  push:
-    branches: [ "main", "ios" ]
-    paths:
-      - "ios/**"
-      - ".github/workflows/build-ios.yml"
   workflow_dispatch:
 
 permissions:
