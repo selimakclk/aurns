@@ -440,4 +440,119 @@ enum MusicLibraryCore {
             return UserPlaylist(id: pl.id, name: pl.name, trackKeys: merged)
         }
     }
+
+    // MARK: - İndirmeden Çalma Listesi Çevrimiçi Anahtarları & Spotify Embed Ayrıştırıcı
+
+    static func isOnlinePlaylistKey(_ key: String) -> Bool {
+        key.hasPrefix("aurns://yt/") || key.hasPrefix("aurns://sp/")
+    }
+
+    private static func cleanOnlinePart(_ raw: String, maxLen: Int) -> String {
+        let cleaned = raw
+            .replacingOccurrences(of: "|", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(cleaned.prefix(maxLen))
+    }
+
+    static func formatOnlineYtKey(videoId: String, title: String, artist: String = "") -> String {
+        let vid = videoId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidYtId(vid) else { return "" }
+        let t = cleanOnlinePart(title.isEmpty ? vid : title, maxLen: 160)
+        let a = cleanOnlinePart(artist, maxLen: 80)
+        let full = (!a.isEmpty && !t.contains(" - ") && a.caseInsensitiveCompare("YouTube") != .orderedSame)
+            ? "\(a) - \(t)" : t
+        return "aurns://yt/\(vid)|\(full)"
+    }
+
+    static func formatOnlineSpKey(artist: String, title: String) -> String {
+        let a = cleanOnlinePart(artist, maxLen: 90)
+        let t = cleanOnlinePart(title, maxLen: 150)
+        guard !a.isEmpty || !t.isEmpty else { return "" }
+        let full = (!a.isEmpty && !t.isEmpty) ? "\(a) - \(t)" : (t.isEmpty ? a : t)
+        return "aurns://sp/\(full)"
+    }
+
+    static func parseOnlinePlaylistKey(_ key: String) -> (ytId: String?, title: String)? {
+        if key.hasPrefix("aurns://yt/") {
+            let rest = String(key.dropFirst(11))
+            if let pipeIdx = rest.firstIndex(of: "|") {
+                let vid = String(rest[..<pipeIdx])
+                guard isValidYtId(vid) else { return nil }
+                let title = String(rest[rest.index(after: pipeIdx)...]).trimmingCharacters(in: .whitespaces)
+                return (vid, title.isEmpty ? vid : title)
+            }
+            return nil
+        }
+        if key.hasPrefix("aurns://sp/") {
+            let title = String(key.dropFirst(11)).trimmingCharacters(in: .whitespaces)
+            return title.isEmpty ? nil : (nil, title)
+        }
+        return nil
+    }
+
+    static func parseSpotifyUrl(_ rawUrl: String) -> (type: String, id: String)? {
+        let trimmed = rawUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let pattern = "(?:spotify\\.com/(?:intl-[a-z-]+/)?|spotify:)(playlist|album|track)[/:]([A-Za-z0-9]{16,32})"
+        guard let rx = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = rx.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+              match.numberOfRanges >= 3,
+              let r1 = Range(match.range(at: 1), in: trimmed),
+              let r2 = Range(match.range(at: 2), in: trimmed) else {
+            return nil
+        }
+        return (String(trimmed[r1]).lowercased(), String(trimmed[r2]))
+    }
+
+    static func parseSpotifyEmbedHtml(_ html: String) -> SpotifyPlaylistData? {
+        guard let marker = html.range(of: "__NEXT_DATA__"),
+              let gt = html[marker.upperBound...].firstIndex(of: ">") else {
+            return nil
+        }
+        let bodyStart = html.index(after: gt)
+        let jsonStr: String
+        if let endTag = html[bodyStart...].range(of: "</script>") {
+            jsonStr = String(html[bodyStart..<endTag.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            jsonStr = String(html[bodyStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let data = jsonStr.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let props = root["props"] as? [String: Any],
+              let pageProps = props["pageProps"] as? [String: Any],
+              let state = pageProps["state"] as? [String: Any],
+              let stateData = state["data"] as? [String: Any],
+              let entity = stateData["entity"] as? [String: Any] else {
+            return nil
+        }
+
+        let name = ((entity["name"] as? String) ?? "")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var tracks: [SpotifyTrackItem] = []
+        if let list = entity["trackList"] as? [[String: Any]] {
+            for item in list {
+                let title = ((item["title"] as? String) ?? "")
+                    .replacingOccurrences(of: "\u{00A0}", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !title.isEmpty else { continue }
+                let artist = ((item["subtitle"] as? String) ?? "")
+                    .replacingOccurrences(of: "\u{00A0}", with: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let durMs = (item["duration"] as? NSNumber)?.intValue ?? 0
+                tracks.append(SpotifyTrackItem(title: title, artist: artist, durationSec: max(0, durMs / 1000)))
+            }
+        }
+        if tracks.isEmpty && !name.isEmpty {
+            let sub = ((entity["subtitle"] as? String) ?? "")
+                .replacingOccurrences(of: "\u{00A0}", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            tracks.append(SpotifyTrackItem(title: name, artist: sub, durationSec: 0))
+        }
+        guard !tracks.isEmpty else { return nil }
+        return SpotifyPlaylistData(name: name.isEmpty ? "Spotify Listesi" : name, tracks: tracks)
+    }
 }

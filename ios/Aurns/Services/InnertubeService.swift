@@ -23,14 +23,15 @@ actor InnertubeResolver {
     private let session: URLSession
     private var streamCache: [String: CachedStream] = [:]
     private var searchCache: [String: CachedSearch] = [:]
+    private var searchIdCache: [String: String] = [:]
     private var inFlightResolves: [String: Task<StreamInfo?, Never>] = [:]
     private var cachedVisitorId: String?
     private var visitorIdDate: Date?
 
     private init() {
         let cfg = URLSessionConfiguration.default
-        cfg.timeoutIntervalForRequest = 12
-        cfg.timeoutIntervalForResource = 25
+        cfg.timeoutIntervalForRequest = 6
+        cfg.timeoutIntervalForResource = 16
         cfg.httpMaximumConnectionsPerHost = 12
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: cfg)
@@ -151,23 +152,24 @@ actor InnertubeResolver {
         }
 
         let task = Task<StreamInfo?, Never> {
-            // iOS AVPlayer M4A (audio/mp4 AAC) akışlarını donanım hızlandırmalı oynatır;
-            // IOS, ANDROID_VR ve VISIONOS istemcilerinden en kaliteli M4A akışını seç.
-            let candidates: [() async -> StreamInfo?] = [
-                { await self.tryResolveWithIos(videoId: clean) },
-                { await self.tryResolveWithAndroidVr(videoId: clean) },
-                { await self.tryResolveWithVisionOs(videoId: clean) }
-            ]
-            var fallback: StreamInfo? = nil
-            for resolver in candidates {
-                if let info = await resolver() {
-                    if info.fileExt == "m4a" {
-                        return info
+            // IOS + ANDROID_VR istemcilerini paralel yarıştır: ilk M4A/AAC yanıtı anında kazanır (~200-350ms!)
+            let fastWinner: StreamInfo? = await withTaskGroup(of: StreamInfo?.self) { group in
+                group.addTask { await self.tryResolveWithIos(videoId: clean) }
+                group.addTask { await self.tryResolveWithAndroidVr(videoId: clean) }
+                var fallback: StreamInfo? = nil
+                for await info in group {
+                    if let info {
+                        if info.fileExt == "m4a" {
+                            group.cancelAll()
+                            return info
+                        }
+                        if fallback == nil { fallback = info }
                     }
-                    if fallback == nil { fallback = info }
                 }
+                return fallback
             }
-            return fallback
+            if let fastWinner { return fastWinner }
+            return await self.tryResolveWithVisionOs(videoId: clean)
         }
 
         inFlightResolves[clean] = task
@@ -182,6 +184,60 @@ actor InnertubeResolver {
             streamCache[clean] = CachedStream(info: resolved, expiresAt: Date().addingTimeInterval(180))
         }
         return resolved
+    }
+
+    func resolveSearchToVideoId(query: String) async -> String? {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return nil }
+        if let direct = MusicLibraryCore.extractYtIdFromUrl(clean) { return direct }
+        let key = clean.lowercased()
+        if let cached = searchIdCache[key] { return cached }
+        let hits = await search(query: clean)
+        guard let vid = hits.first?.videoId, MusicLibraryCore.isValidYtId(vid) else { return nil }
+        if searchIdCache.count > 64 { searchIdCache.removeAll() }
+        searchIdCache[key] = vid
+        return vid
+    }
+
+    func prefetchSearchTitle(query: String) {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        Task {
+            if let vid = await resolveSearchToVideoId(query: clean) {
+                _ = await resolveAudioStream(videoId: vid)
+            }
+        }
+    }
+
+    func fetchSpotifyPlaylist(rawUrl: String) async -> SpotifyPlaylistData? {
+        let trimmed = rawUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var parsed = MusicLibraryCore.parseSpotifyUrl(trimmed)
+        let low = trimmed.lowercased()
+        if parsed == nil && (low.contains("spotify.link") || low.contains("spoti.fi")),
+           let shortURL = URL(string: trimmed) {
+            var req = URLRequest(url: shortURL)
+            req.setValue(Self.uaDesktop, forHTTPHeaderField: "User-Agent")
+            if let (_, resp) = try? await session.data(for: req),
+               let finalStr = resp.url?.absoluteString {
+                parsed = MusicLibraryCore.parseSpotifyUrl(finalStr)
+            }
+        }
+        guard let (spType, spId) = parsed,
+              let embedURL = URL(string: "https://open.spotify.com/embed/\(spType)/\(spId)") else {
+            return nil
+        }
+
+        var req = URLRequest(url: embedURL)
+        req.setValue(Self.uaDesktop, forHTTPHeaderField: "User-Agent")
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let html = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return MusicLibraryCore.parseSpotifyEmbedHtml(html)
     }
 
     private func fetchVisitorId() async -> String? {

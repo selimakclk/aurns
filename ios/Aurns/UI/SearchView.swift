@@ -11,6 +11,9 @@ struct SearchView: View {
     @State private var isSearching = false
     @State private var ytResults: [SearchResult] = []
     @State private var searchTask: Task<Void, Never>? = nil
+    @State private var pendingAddToPlaylistItem: SearchResult? = nil
+    @State private var showCreatePlaylistAlert = false
+    @State private var newPlaylistName = ""
 
     private var localMatches: [Track] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -112,6 +115,85 @@ struct SearchView: View {
             }
             .background(pal.bgShell)
         }
+        .sheet(isPresented: Binding(
+            get: { pendingAddToPlaylistItem != nil },
+            set: { if !$0 { pendingAddToPlaylistItem = nil } }
+        )) {
+            addSearchItemToPlaylistSheet
+        }
+        .alert("Yeni Çalma Listesi", isPresented: $showCreatePlaylistAlert) {
+            TextField("Liste adı (Örn: Favoriler)", text: $newPlaylistName)
+            Button("Oluştur ve Ekle") {
+                if let created = library.createPlaylist(name: newPlaylistName),
+                   let item = pendingAddToPlaylistItem {
+                    let key = keyForSearchResult(item)
+                    if !key.isEmpty {
+                        library.addTracksToPlaylist(playlistId: created.id, keys: [key])
+                        app.showToast("'\(created.name)' oluşturuldu ve eklendi (indirmeden)")
+                    }
+                }
+                newPlaylistName = ""
+                pendingAddToPlaylistItem = nil
+            }
+            Button("İptal", role: .cancel) { newPlaylistName = "" }
+        }
+    }
+
+    private func keyForSearchResult(_ item: SearchResult) -> String {
+        let localIdx = MusicLibraryCore.findExactLocalTrackForYoutube(
+            tracks: library.matchInputs,
+            targetTitle: item.title,
+            targetYtId: item.videoId
+        )
+        if localIdx >= 0 && localIdx < library.allTracks.count {
+            return library.allTracks[localIdx].storageKey
+        }
+        return MusicLibraryCore.formatOnlineYtKey(videoId: item.videoId, title: item.title, artist: item.artist)
+    }
+
+    private var addSearchItemToPlaylistSheet: some View {
+        NavigationStack {
+            List {
+                if library.userPlaylists.isEmpty {
+                    Text("Henüz özel çalma listen yok. Sağ üstteki '+ Yeni' ile oluşturabilirsin.")
+                        .foregroundColor(pal.textDim)
+                } else {
+                    ForEach(library.userPlaylists) { pl in
+                        Button {
+                            if let item = pendingAddToPlaylistItem {
+                                let key = keyForSearchResult(item)
+                                if !key.isEmpty {
+                                    library.addTracksToPlaylist(playlistId: pl.id, keys: [key])
+                                    app.showToast("'\(pl.name)' listesine eklendi (indirmeden)")
+                                }
+                            }
+                            pendingAddToPlaylistItem = nil
+                        } label: {
+                            HStack {
+                                Image(systemName: "music.note.list").foregroundColor(pal.greenText)
+                                Text(pl.name).foregroundColor(pal.textPri)
+                                Spacer()
+                                Text("\(pl.trackKeys.count) şarkı").font(.caption).foregroundColor(pal.textDim)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("İndirmeden Listeye Ekle")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Kapat") { pendingAddToPlaylistItem = nil }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("+ Yeni") {
+                        newPlaylistName = ""
+                        showCreatePlaylistAlert = true
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 
     private func triggerSearch(immediate: Bool) {
@@ -124,7 +206,7 @@ struct SearchView: View {
         }
         searchTask = Task { @MainActor in
             if !immediate {
-                try? await Task.sleep(nanoseconds: 380_000_000)
+                try? await Task.sleep(nanoseconds: 240_000_000)
                 if Task.isCancelled { return }
             }
             isSearching = true
@@ -132,6 +214,10 @@ struct SearchView: View {
             if !Task.isCancelled {
                 ytResults = hits
                 isSearching = false
+                // İlk 3 YouTube sonucunun akışını ön-ısıt -> ▶ Çal anında (0ms bekleme!)
+                for top in hits.prefix(3) {
+                    await InnertubeResolver.shared.prefetchAudioStream(videoId: top.videoId)
+                }
             }
         }
     }
@@ -221,7 +307,18 @@ struct SearchView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
+                // İndirmeden Çalma Listesine Ekle (+ Liste)
+                Button {
+                    pendingAddToPlaylistItem = item
+                } label: {
+                    Image(systemName: "text.badge.plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(pal.textPri)
+                        .frame(width: 32, height: 32)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(pal.bgElevated))
+                }
+
                 // Direkt Çal (İndirmeden çevrimiçi akış — yerelde varsa yerelden çalar!)
                 Button {
                     app.playOnlineSearchResult(item)

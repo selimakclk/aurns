@@ -370,10 +370,20 @@ struct LibraryView: View {
             }
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(split.song)
-                    .font(.system(size: 14, weight: isCurrent ? .bold : .medium))
-                    .foregroundColor(isCurrent ? pal.greenText : pal.textPri)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(split.song)
+                        .font(.system(size: 14, weight: isCurrent ? .bold : .medium))
+                        .foregroundColor(isCurrent ? pal.greenText : pal.textPri)
+                        .lineLimit(1)
+                    if track.isOnlinePlaceholder || track.isOnlineStream {
+                        Text("AKIŞ")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(pal.greenText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(pal.greenSoftPill))
+                    }
+                }
                 Text(split.artist)
                     .font(.system(size: 12))
                     .foregroundColor(pal.textDim)

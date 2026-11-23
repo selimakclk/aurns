@@ -205,6 +205,7 @@ final class AudioPlayerEngine: ObservableObject {
         let item: AVPlayerItem
         if let localURL = track.fileURL {
             item = AVPlayerItem(url: localURL)
+            player.automaticallyWaitsToMinimizeStalling = true
         } else if let streamURL = track.streamURL {
             var options: [String: Any] = [:]
             if let ua = track.streamUserAgent, !ua.isEmpty {
@@ -212,6 +213,8 @@ final class AudioPlayerEngine: ObservableObject {
             }
             let asset = AVURLAsset(url: streamURL, options: options)
             item = AVPlayerItem(asset: asset)
+            item.preferredForwardBufferDuration = 2.0
+            player.automaticallyWaitsToMinimizeStalling = false
         } else {
             return
         }

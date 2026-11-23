@@ -265,4 +265,39 @@ final class AurnsCoreTests: XCTestCase {
         XCTAssertEqual(restored[0].ytId, "YtId0000000")
         XCTAssertEqual(restored[1].ytId, "")
     }
+
+    // MARK: - Spotify Embed & İndirmeden Çalma Listesi Anahtarları
+
+    func testSpotifyParserAndOnlinePlaylistKeys() {
+        let parsedUrl = MusicLibraryCore.parseSpotifyUrl("https://open.spotify.com/intl-tr/playlist/37i9dQZF1DXcBWIGoYBM5M?si=xyz")
+        XCTAssertEqual(parsedUrl?.type, "playlist")
+        XCTAssertEqual(parsedUrl?.id, "37i9dQZF1DXcBWIGoYBM5M")
+        XCTAssertNil(MusicLibraryCore.parseSpotifyUrl("https://example.com/nope"))
+
+        let sampleHtml = """
+        <html><body><script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"state":{"data":{"entity":{"name":"Gece Modu","trackList":[
+        {"title":"Işıklı Yol","subtitle":"İzel,\u{00A0}Ercan","duration":259000},
+        {"title":"Halbuki","subtitle":"Yalın","duration":203000}]}}}}}}
+        </script></body></html>
+        """
+        let sp = MusicLibraryCore.parseSpotifyEmbedHtml(sampleHtml)
+        XCTAssertNotNil(sp)
+        XCTAssertEqual(sp?.name, "Gece Modu")
+        XCTAssertEqual(sp?.tracks.count, 2)
+        XCTAssertEqual(sp?.tracks.first?.artist, "İzel, Ercan")
+        XCTAssertEqual(sp?.tracks.first?.durationSec, 259)
+
+        let ytKey = MusicLibraryCore.formatOnlineYtKey(videoId: "dQw4w9WgXcQ", title: "Halbuki", artist: "Yalın")
+        XCTAssertTrue(MusicLibraryCore.isOnlinePlaylistKey(ytKey))
+        let parsedYt = MusicLibraryCore.parseOnlinePlaylistKey(ytKey)
+        XCTAssertEqual(parsedYt?.ytId, "dQw4w9WgXcQ")
+        XCTAssertEqual(parsedYt?.title, "Yalın - Halbuki")
+
+        let spKey = MusicLibraryCore.formatOnlineSpKey(artist: "Tate McRae", title: "Housewife")
+        XCTAssertTrue(MusicLibraryCore.isOnlinePlaylistKey(spKey))
+        let parsedSp = MusicLibraryCore.parseOnlinePlaylistKey(spKey)
+        XCTAssertNil(parsedSp?.ytId)
+        XCTAssertEqual(parsedSp?.title, "Tate McRae - Housewife")
+    }
 }

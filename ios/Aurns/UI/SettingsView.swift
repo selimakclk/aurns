@@ -14,6 +14,10 @@ struct SettingsView: View {
     @State private var showM3uImportPicker = false
     @State private var showAudioImportPicker = false
     @State private var showClearConfirm = false
+    @State private var showSpotifyLinkAlert = false
+    @State private var spotifyUrlInput = ""
+    @State private var isFetchingSpotify = false
+    @State private var fetchedSpotifyData: SpotifyPlaylistData? = nil
     @State private var updateStatus = ""
     @State private var isCheckingUpdate = false
 
@@ -62,6 +66,53 @@ struct SettingsView: View {
             Button("Vazgeç", role: .cancel) {}
         } message: {
             Text("Şarkılar listeden gizlenir, iPhone depolamasındaki ses dosyaları korunur.")
+        }
+        .alert("Spotify Listesi İçe Aktar", isPresented: $showSpotifyLinkAlert) {
+            TextField("https://open.spotify.com/playlist/...", text: $spotifyUrlInput)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            Button("Devam Et") {
+                let raw = spotifyUrlInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !raw.isEmpty else { return }
+                isFetchingSpotify = true
+                app.showToast("Spotify listesi okunuyor...")
+                Task {
+                    let data = await InnertubeResolver.shared.fetchSpotifyPlaylist(rawUrl: raw)
+                    isFetchingSpotify = false
+                    if let data, !data.tracks.isEmpty {
+                        fetchedSpotifyData = data
+                    } else {
+                        app.showToast("Spotify listesi okunamadı, herkese açık bir link deneyin")
+                    }
+                }
+            }
+            Button("Vazgeç", role: .cancel) {}
+        } message: {
+            Text("Herkese açık Spotify çalma listesi veya albüm linkini yapıştır.")
+        }
+        .confirmationDialog(
+            fetchedSpotifyData.map { "\"\($0.name)\" (\($0.tracks.count) şarkı)" } ?? "Spotify Listesi",
+            isPresented: Binding(
+                get: { fetchedSpotifyData != nil },
+                set: { if !$0 { fetchedSpotifyData = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Sadece Ekle (İndirmeden Direkt Çal)") {
+                if let sp = fetchedSpotifyData {
+                    fetchedSpotifyData = nil
+                    app.importSpotifyPlaylist(data: sp, downloadAll: false)
+                }
+            }
+            Button("İndir ve Listeye Ekle") {
+                if let sp = fetchedSpotifyData {
+                    fetchedSpotifyData = nil
+                    app.importSpotifyPlaylist(data: sp, downloadAll: true)
+                }
+            }
+            Button("Vazgeç", role: .cancel) { fetchedSpotifyData = nil }
+        } message: {
+            Text("İndirmeden eklersen depolama harcamaz ve tıkladığında anında çevrimiçi çalar.")
         }
     }
 
@@ -240,6 +291,11 @@ struct SettingsView: View {
             Label("Çalma Listesi ve Dosyalar", systemImage: "square.and.arrow.up.on.square")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundColor(pal.textPri)
+
+            actionRow(icon: "music.note.list", title: "Spotify Listesi İçe Aktar", subtitle: "Spotify linkiyle ekle — indir veya indirmeden direkt çal") {
+                spotifyUrlInput = ""
+                showSpotifyLinkAlert = true
+            }
 
             actionRow(icon: "square.and.arrow.up", title: "Çalma Listesini Dışa Aktar (.m3u8)", subtitle: "Hangi listeyi aktaracağını seç, adıyla paylaş") {
                 showExportPlaylistPicker = true

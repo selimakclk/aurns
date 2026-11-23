@@ -135,11 +135,127 @@ final class AppCoordinator: ObservableObject {
     // MARK: - Oynatma & Direkt Akış (`▶ Çal`)
 
     func playTrack(_ track: Track, broadcastJam: Bool = true) {
+        if track.isOnlinePlaceholder {
+            streamOnlinePlaylistTrack(track)
+            return
+        }
         player.play(track: track)
+        prefetchNextTrackInDisplayed(after: track.id)
         notifyPlaybackPresence(track: track, isPlaying: true)
         if broadcastJam && !isApplyingRemoteJam && (friends.jamState.isActive || friends.jamState.isInviting) {
             let fullTitle = MusicLibraryCore.formatTrackFullTitle(title: track.title, artist: track.artist)
             friends.broadcastJamState(title: fullTitle, ytId: track.ytId ?? "", isPlaying: true, posMs: 0)
+        }
+    }
+
+    private func prefetchNextTrackInDisplayed(after currentId: String) {
+        let list = library.displayedTracks
+        guard list.count > 1, let idx = list.firstIndex(where: { $0.id == currentId }) else { return }
+        let nxt = list[(idx + 1) % list.count]
+        guard nxt.isOnlinePlaceholder, let parsed = MusicLibraryCore.parseOnlinePlaylistKey(nxt.id) else { return }
+        Task {
+            if let vid = parsed.ytId {
+                await InnertubeResolver.shared.prefetchAudioStream(videoId: vid)
+            } else {
+                await InnertubeResolver.shared.prefetchSearchTitle(query: parsed.title)
+            }
+        }
+    }
+
+    private func streamOnlinePlaylistTrack(_ placeholder: Track) {
+        guard let parsed = MusicLibraryCore.parseOnlinePlaylistKey(placeholder.id) else { return }
+        let marker = parsed.ytId ?? placeholder.id
+        guard streamingVideoId != marker else { return }
+        streamingVideoId = marker
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { if self.streamingVideoId == marker { self.streamingVideoId = nil } }
+
+            let resolvedVid: String?
+            if let vid = parsed.ytId {
+                resolvedVid = vid
+            } else {
+                resolvedVid = await InnertubeResolver.shared.resolveSearchToVideoId(query: parsed.title)
+            }
+            guard let vid = resolvedVid else {
+                self.showToast("Parça çevrimiçi bulunamadı")
+                return
+            }
+            var stream = await InnertubeResolver.shared.resolveAudioStream(videoId: vid)
+            if stream == nil {
+                stream = await InnertubeResolver.shared.resolveAudioStream(videoId: vid, bypassCache: true)
+            }
+            guard let info = stream, let url = URL(string: info.url) else {
+                self.showToast("Çevrimiçi akış açılamadı, tekrar deneyin")
+                return
+            }
+
+            let resolvedTrack = Track(
+                id: placeholder.id,
+                title: placeholder.title,
+                artist: placeholder.artist,
+                fileURL: nil,
+                streamURL: url,
+                streamUserAgent: info.userAgent,
+                durationSec: 0,
+                ytId: vid,
+                thumbnailURL: "https://i.ytimg.com/vi/\(vid)/mqdefault.jpg"
+            )
+            self.player.play(track: resolvedTrack)
+            self.prefetchNextTrackInDisplayed(after: placeholder.id)
+            self.notifyPlaybackPresence(track: resolvedTrack, isPlaying: true)
+            if !self.isApplyingRemoteJam && (self.friends.jamState.isActive || self.friends.jamState.isInviting) {
+                let fullTitle = MusicLibraryCore.formatTrackFullTitle(title: resolvedTrack.title, artist: resolvedTrack.artist)
+                self.friends.broadcastJamState(title: fullTitle, ytId: vid, isPlaying: true, posMs: 0)
+            }
+        }
+    }
+
+    func importSpotifyPlaylist(data: SpotifyPlaylistData, downloadAll: Bool) {
+        let listName = data.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let created = library.createPlaylist(name: listName.isEmpty ? "Spotify Listesi" : listName) else { return }
+        let inputs = library.matchInputs
+        var keysToAdd: [String] = []
+        var missingToDownload: [(title: String, artist: String)] = []
+
+        for sp in data.tracks {
+            let full = sp.artist.isEmpty ? sp.title : "\(sp.artist) - \(sp.title)"
+            let localIdx = MusicLibraryCore.findBestTrackMatch(tracks: inputs, targetTitle: full, targetYtId: nil)
+            if localIdx >= 0 && localIdx < library.allTracks.count {
+                keysToAdd.append(library.allTracks[localIdx].storageKey)
+            } else if !downloadAll {
+                let spKey = MusicLibraryCore.formatOnlineSpKey(artist: sp.artist, title: sp.title)
+                if !spKey.isEmpty { keysToAdd.append(spKey) }
+            } else {
+                missingToDownload.append((full, sp.artist))
+            }
+        }
+
+        if !keysToAdd.isEmpty {
+            library.addTracksToPlaylist(playlistId: created.id, keys: keysToAdd)
+        }
+        library.selectedPlaylistId = created.id
+        selectedTab = .library
+
+        if !downloadAll {
+            Task {
+                for sp in data.tracks.prefix(2) {
+                    let q = sp.artist.isEmpty ? sp.title : "\(sp.artist) - \(sp.title)"
+                    await InnertubeResolver.shared.prefetchSearchTitle(query: q)
+                }
+            }
+            showToast("'\(created.name)' eklendi (\(data.tracks.count) parça • indirmeden anında çalar)")
+            return
+        }
+
+        for item in missingToDownload {
+            downloads.enqueue(videoId: "", title: item.title, artist: item.artist, targetPlaylistId: created.id, isFromSync: false)
+        }
+        if missingToDownload.isEmpty {
+            showToast("'\(created.name)' oluşturuldu (tüm şarkılar zaten cihazında)")
+        } else {
+            showToast("'\(created.name)' oluşturuldu • \(missingToDownload.count) parça indiriliyor")
         }
     }
 

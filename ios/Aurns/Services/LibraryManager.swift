@@ -49,7 +49,40 @@ final class LibraryManager: ObservableObject {
     var displayedTracks: [Track] {
         guard let pl = activePlaylist else { return allTracks }
         let map = Dictionary(uniqueKeysWithValues: allTracks.map { ($0.storageKey, $0) })
-        return pl.trackKeys.compactMap { map[$0] }
+        let inputs = matchInputs
+        var out: [Track] = []
+        out.reserveCapacity(pl.trackKeys.count)
+        for key in pl.trackKeys {
+            if MusicLibraryCore.isOnlinePlaylistKey(key),
+               let parsed = MusicLibraryCore.parseOnlinePlaylistKey(key) {
+                let localIdx: Int
+                if let vid = parsed.ytId {
+                    localIdx = MusicLibraryCore.findExactLocalTrackForYoutube(tracks: inputs, targetTitle: parsed.title, targetYtId: vid)
+                } else {
+                    localIdx = MusicLibraryCore.findBestTrackMatch(tracks: inputs, targetTitle: parsed.title, targetYtId: nil)
+                }
+                if localIdx >= 0 && localIdx < allTracks.count {
+                    out.append(allTracks[localIdx])
+                } else {
+                    let split = MusicLibraryCore.splitDisplaySongAndArtist(title: parsed.title, artist: "Çevrimiçi")
+                    let artLabel = split.artist.contains("Çevrimiçi") ? split.artist : "\(split.artist) • Çevrimiçi"
+                    out.append(Track(
+                        id: key,
+                        title: parsed.title,
+                        artist: artLabel,
+                        fileURL: nil,
+                        streamURL: nil,
+                        streamUserAgent: nil,
+                        durationSec: 0,
+                        ytId: parsed.ytId,
+                        thumbnailURL: parsed.ytId.map { "https://i.ytimg.com/vi/\($0)/mqdefault.jpg" }
+                    ))
+                }
+            } else if let local = map[key] {
+                out.append(local)
+            }
+        }
+        return out
     }
 
     var matchInputs: [TrackMatchInput] {

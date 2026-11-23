@@ -12,7 +12,19 @@ struct Track: Identifiable, Hashable, Codable {
     let thumbnailURL: String?
 
     var isOnlineStream: Bool { fileURL == nil && streamURL != nil }
+    var isOnlinePlaceholder: Bool { fileURL == nil && streamURL == nil && MusicLibraryCore.isOnlinePlaylistKey(id) }
     var storageKey: String { fileURL?.lastPathComponent ?? id }
+}
+
+struct SpotifyTrackItem: Hashable {
+    let title: String
+    let artist: String
+    let durationSec: Int
+}
+
+struct SpotifyPlaylistData: Equatable {
+    let name: String
+    let tracks: [SpotifyTrackItem]
 }
 
 struct UserPlaylist: Identifiable, Hashable, Codable {
